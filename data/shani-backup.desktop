@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Shani Backup
+Comment=Backup utility for Shanios
+Exec=shani-backup
+Icon=system-run
+Terminal=false
+Type=Application
+Categories=Utility;
+Keywords=backup;btrfs;restic;rclone;

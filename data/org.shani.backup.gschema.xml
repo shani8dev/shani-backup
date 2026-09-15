@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.shani.backup" path="/org/shani/backup/">
+    <key name="backup-location" type="s">
+      <default>'/mnt/backups'</default>
+      <summary>Backup location</summary>
+      <description>Default location for storing backups</description>
+    </key>
+    <key name="enable-scheduler" type="b">
+      <default>false</default>
+      <summary>Enable automatic scheduler</summary>
+      <description>Whether to enable the automatic backup scheduler</description>
+    </key>
+    <key name="schedule-time" type="s">
+      <default>'02:00'</default>
+      <summary>Schedule time (HH:MM)</summary>
+      <description>Time of day to run automatic backups</description>
+    </key>
+  </schema>
+</schemalist>
