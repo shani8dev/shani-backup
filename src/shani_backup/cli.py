@@ -4,9 +4,12 @@ Command-line interface for Shani Backup.
 """
 
 import argparse
+import subprocess
 import sys
+import os
 from . import __version__
 from . import btrfs
+from .config import get_config, apply_config_defaults
 
 
 def main():
@@ -66,9 +69,66 @@ def main():
     args = parser.parse_args()
 
     if args.command == "backup":
-        print(f"Backing up {args.source} to {args.destination or '<default>'}")
+        # Initialize config
+        config = get_config()
+        apply_config_defaults()
+        
+        # Get backup location from config or use provided destination
+        backup_location = args.destination if args.destination else config.get_backup_location()
+        
+        if not backup_location:
+            print("Error: No backup location specified. Provide --destination or configure backup-location in settings.")
+            sys.exit(1)
+        
+        # Check if source exists
+        if not os.path.exists(args.source):
+            print(f"Error: Source directory '{args.source}' does not exist")
+            sys.exit(1)
+        
+        # Use restic to backup the source directory
+        cmd = ["restic", "backup", args.source, "--repo", backup_location]
+        try:
+            print(f"Starting backup of {args.source} to {backup_location}...")
+            subprocess.run(cmd, check=True)
+            print(f"Backup of {args.source} completed successfully.")
+            print(f"Repository: {backup_location}")
+        except subprocess.CalledProcessError as e:
+            print(f"Backup failed: {e}")
+            sys.exit(1)
+        except FileNotFoundError:
+            print("Error: restic command not found. Please install restic.")
+            sys.exit(1)
     elif args.command == "restore":
-        print(f"Restoring {args.backup} to {args.target}")
+        # Initialize config
+        config = get_config()
+        apply_config_defaults()
+        
+        # Get repository from config or use provided backup
+        repository = args.backup if args.backup else config.get_backup_location()
+        
+        if not repository:
+            print("Error: No backup repository specified. Provide backup argument or configure backup-location in settings.")
+            sys.exit(1)
+        
+        # Check if target directory exists
+        if not os.path.exists(args.target):
+            print(f"Error: Target directory '{args.target}' does not exist")
+            sys.exit(1)
+        
+        # Use restic to restore
+        # In a real implementation, we would let the user choose which snapshot to restore
+        cmd = ["restic", "restore", "latest", "--target", args.target, "--repo", repository]
+        try:
+            print(f"Starting restore from {repository} to {args.target}...")
+            subprocess.run(cmd, check=True)
+            print(f"Restored latest snapshot to {args.target}.")
+            print(f"Repository: {repository}")
+        except subprocess.CalledProcessError as e:
+            print(f"Restore failed: {e}")
+            sys.exit(1)
+        except FileNotFoundError:
+            print("Error: restic command not found. Please install restic.")
+            sys.exit(1)
     elif args.command == "snapshot":
         if args.snapshot_command == "create":
             success = btrfs.create_snapshot(args.source, args.destination, args.readonly)
@@ -96,12 +156,45 @@ def main():
             snapshot_parser.print_help()
             sys.exit(1)
     elif args.command == "schedule":
+        config = get_config()
         if args.enable:
             print("Enabling scheduler")
+            success = config.set_scheduler_enabled(True)
+            if success:
+                print("Scheduler enabled successfully")
+            else:
+                print("Failed to enable scheduler")
+                sys.exit(1)
         elif args.disable:
             print("Disabling scheduler")
+            success = config.set_scheduler_enabled(False)
+            if success:
+                print("Scheduler disabled successfully")
+            else:
+                print("Failed to disable scheduler")
+                sys.exit(1)
         else:
-            print("Scheduler status: <not implemented>")
+            # Show current scheduler status
+            enabled = config.get_scheduler_enabled()
+            if enabled is None:
+                print("Scheduler status: GSettings not available")
+            elif enabled:
+                print("Scheduler status: ENABLED")
+            else:
+                print("Scheduler status: DISABLED")
+            schedule_time = config.get_schedule_time()
+            if schedule_time:
+                print(f"Schedule time: {schedule_time}")
+            backup_location = config.get_backup_location()
+            if backup_location:
+                print(f"Backup location: {backup_location}")
+            
+            # Validate configuration
+            errors = config.validate_configuration()
+            if errors:
+                print("Configuration issues:")
+                for error in errors:
+                    print(f"  - {error}")
     else:
         parser.print_help()
         sys.exit(1)
