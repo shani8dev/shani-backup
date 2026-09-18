@@ -44,6 +44,17 @@ For an end-to-end check of snapshot logic, point the CLI at a throwaway
 btrfs subvolume on loopback — never against the user's real data. If the
 repo gains a test suite or CI, prefer those and update this section.
 
+## Boundaries
+
+- ✅ **Always**: `py_compile` + the CLI `--help` smoke test before calling a
+  change done (see above).
+- ⚠️ **Ask first**: adding a `LICENSE` file — needs the maintainer's actual
+  license choice (see "Known gaps" below), not a default guess.
+- 🚫 **Never**: point this CLI or its snapshot/restore logic at a real user's
+  btrfs subvolumes to test a change — use a throwaway loopback subvolume
+  only. This is a backup tool; a bug exercised against real data is exactly
+  the failure mode it exists to prevent, not a place to find one.
+
 ## Audit status
 
 **NOT YET AUDITED.** This repo has no audit-verified known-issues inventory
