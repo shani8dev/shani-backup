@@ -26,7 +26,9 @@ If you haven't seen it work (or fail) for real, it isn't verified.
 
 There is no `tests/` directory and no `.github/workflows/` today, so the
 only automated gate available is the interpreter. Before calling a change
-done:
+done, be able to state the specific observable pass condition ("`--help`
+exits 0 and lists the `snapshot`/`restore` subcommands", not "should
+work") and which command below actually proves it:
 
 ```bash
 # 1. Compile-check every module you touched (catches syntax/NameError
@@ -37,12 +39,19 @@ python3 -m py_compile src/shani_backup/*.py src/shani_backup/ui/*.py
 #    prefer a dry/dry-run path or a `--help` argument over touching real
 #    btrfs subvolumes. A regression that breaks command dispatch is the
 #    most likely regression here.
-python3 -m shani_backup.cli --help
+PYTHONPATH=src python3 -m shani_backup.cli --help
 ```
 
 For an end-to-end check of snapshot logic, point the CLI at a throwaway
 btrfs subvolume on loopback — never against the user's real data. If the
 repo gains a test suite or CI, prefer those and update this section.
+
+## Commit discipline
+
+Before composing a commit message, run `git log --oneline -20` (and `git
+log -5 -- <touched paths>` for the files you changed) and match the
+existing style — subject shape, scope prefixes, body detail level —
+rather than writing in a generic format.
 
 ## Boundaries
 
