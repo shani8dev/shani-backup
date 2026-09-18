@@ -74,8 +74,8 @@ issues" section and a `## Cross-repo impact" section here, matching the
 sibling repos' shape.
 
 ## Known gaps (needs maintainer decision)
-- **No LICENSE** — this repo (like `shani-website`, `shani-docs`,
-  `shani-chronoa`) currently ships no license file. The web content repos
+- **No LICENSE** — this repo (like `shani-website`, `shani-docs`)
+  currently ships no license file. The web content repos
   carry MIT only in `shani-blog`; OS-side repos carry GPL-3.0. Decide and
   add a `LICENSE`.
 - **No CI / no tests** — `py_compile` + a CLI smoke test are the only
