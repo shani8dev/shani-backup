@@ -18,16 +18,19 @@ run the CLI or launch the GTK4 window. The repo uses conventional commits
   GSettings.
 - **GSettings-backed configuration** — `config.py` talks to the
   `org.shani.backup` schema; no config files to edit by hand.
-- **GTK4 UI** — `ui/main_window.py` exposes snapshots, backup jobs, and
-  scheduler status in a native window.
+- **GTK4 UI** — `ui/main_window.py`'s `ShaniBackupWindow` (an
+  `Adw.Window`) exposes snapshots, backup jobs, and scheduler status in a
+  native window, driven by the `ShaniBackupApp(Adw.Application)` entry point
+  in the same file.
 
 ## Architecture
 
 ```
 ┌──────────────────────────────────────┐
-│         GTK4 UI (main_window.py)     │
+│  GTK4 UI (ui/main_window.py)         │
+│  ShaniBackupApp → ShaniBackupWindow  │
 └──────────────────┬───────────────────┘
-                   │
+                   │  calls the same code paths as the CLI
 ┌──────────────────▼───────────────────┐
 │        shani_backup.cli              │
 │   (argparse dispatch, subcommands)   │
@@ -42,7 +45,9 @@ run the CLI or launch the GTK4 window. The repo uses conventional commits
 ```
 
 `cli.py` is the single dispatch point. The GTK4 UI calls the same code
-paths the CLI does, so the two always agree. Snapshot operations shell out
+paths the CLI does, so the two always agree — the UI is not a separate
+`MainWindow` class; it's `ShaniBackupWindow` constructed by
+`ShaniBackupApp.do_activate()`. Snapshot operations shell out
 to the `btrfs` tool; directory backups shell out to `restic`.
 
 ## CLI
@@ -119,8 +124,10 @@ mode it exists to prevent.
 - **No LICENSE** — needs the maintainer's actual license choice.
 - **No CI / no tests** — `py_compile` + a CLI smoke test are the only
   automated gates.
-- **Single `main_window.py`** — the GTK4 UI is one file; a regression in
-  signal wiring is only visible in a real GUI run.
+- **Single `main_window.py`** — the GTK4 UI is one file (no templates);
+  a regression in signal wiring is only visible in a real GUI run. The
+  window class is `ShaniBackupWindow`, not `MainWindow` — there is no
+  `MainWindow` symbol in this repo.
 
 ## Cross-repo impact
 

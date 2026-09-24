@@ -6,4 +6,4 @@ Icon=system-run
 Terminal=false
 Type=Application
 Categories=Utility;
-Keywords=backup;btrfs;restic;rclone;
+Keywords=backup;btrfs;restic;
