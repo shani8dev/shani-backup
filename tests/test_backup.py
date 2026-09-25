@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -31,8 +32,27 @@ def test_cli_help_lists_commands():
         assert cmd in r.stdout
 
 
-def test_cli_without_command_fails():
-    assert cli().returncode == 1
+def test_cli_without_command_and_display_prints_help():
+    env = {k: v for k, v in ENV.items() if k not in ("DISPLAY", "WAYLAND_DISPLAY")}
+    r = subprocess.run([sys.executable, "-m", "shani_backup.cli"], capture_output=True,
+                       text=True, env=env, cwd=REPO)
+    assert r.returncode == 1 and "usage:" in r.stdout
+
+
+@pytest.mark.skipif(not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")),
+                    reason="needs a display (CI runs under xvfb-run)")
+def test_launcher_command_opens_the_window(schema_dir):
+    """What the .desktop entry runs (plain `shani-backup`) opens the app."""
+    p = subprocess.Popen([sys.executable, "-m", "shani_backup.cli"], stdout=subprocess.PIPE,
+                         stderr=subprocess.STDOUT, text=True,
+                         env={**ENV, "GSETTINGS_SCHEMA_DIR": str(schema_dir), "GSETTINGS_BACKEND": "memory"},
+                         cwd=REPO)
+    try:
+        time.sleep(4)
+        assert p.poll() is None, "exited instead of opening the window: " + p.stdout.read()
+    finally:
+        p.terminate()
+        p.wait(10)
 
 
 @pytest.fixture(scope="session")

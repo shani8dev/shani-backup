@@ -195,6 +195,12 @@ def main():
                 print("Configuration issues:")
                 for error in errors:
                     print(f"  - {error}")
+    elif os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY"):
+        # no subcommand on a desktop: open the app. The .desktop entry runs
+        # plain `shani-backup`, which used to print this help and exit, so
+        # the launcher never opened anything.
+        from .ui.main_window import main as gui_main
+        sys.exit(gui_main())
     else:
         parser.print_help()
         sys.exit(1)
