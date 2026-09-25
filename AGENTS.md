@@ -24,8 +24,10 @@ If you haven't seen it work (or fail) for real, it isn't verified.
 
 ## Verification for any change
 
-There is no `tests/` directory and no `.github/workflows/` today, so the
-only automated gate available is the interpreter. Before calling a change
+`tests/test_backup.py` runs the checks below as a suite (CI:
+`.github/workflows/ci.yml` - GTK under Xvfb, the btrfs tests as root on a
+throwaway loopback fs): `python3 -m pytest tests/ -v`, plus
+`sudo python3 -m pytest tests/ -v -k btrfs` for the snapshot tests. Before calling a change
 done, be able to state the specific observable pass condition ("`--help`
 exits 0 and lists the `snapshot`/`restore` subcommands", not "should
 work") and which command below actually proves it:
@@ -45,9 +47,10 @@ PYTHONPATH=src python3 -m shani_backup.cli --help
 #    that py_compile can't see (this repo already shipped an Adwaita API
 #    regression that a source read missed). The schema must be compiled
 #    first or the window fails at runtime, not import:
+#    (GSETTINGS_SCHEMA_DIR - GLib ignores XDG_SCHEMA_DIRS, verified)
 mkdir -p /tmp/shani-schema && cp data/*.xml /tmp/shani-schema/ &&
   glib-compile-schemas /tmp/shani-schema/
-XDG_SCHEMA_DIRS=/tmp/shani-schema PYTHONPATH=src python3 -c "
+GSETTINGS_SCHEMA_DIR=/tmp/shani-schema PYTHONPATH=src python3 -c "
 import gi; gi.require_version('Gtk','4.0'); gi.require_version('Adw','1')
 from shani_backup.ui.main_window import ShaniBackupWindow, ShaniBackupApp
 from gi.repository import Gtk
@@ -65,7 +68,7 @@ builds a window.
 
 For an end-to-end check of snapshot logic, point the CLI at a throwaway
 btrfs subvolume on loopback — never against the user's real data. If the
-repo gains a test suite or CI, prefer those and update this section.
+test suite's btrfs tests do exactly that (root only).
 
 ## Commit discipline
 
@@ -91,7 +94,7 @@ rather than writing in a generic format.
 - **`shani-backup-scheduler.service` referenced by the `.install` hook but doesn't exist — FIXED (2026-09-23, same pkgrel 2).** `pre_remove()` dropped entirely (it only held those two lines); the real remove in the same container ran the remaining hooks with rc=0. Original finding: `shani-pkgbuilds/shani-backup/shani-backup.install:14-15` runs `systemctl stop/disable shani-backup-scheduler.service` in `pre_remove`, but no such unit ships anywhere — `grep -rn shani-backup-scheduler src/ data/` is empty, and there's no `systemd/` tree in this repo. Harmless (`|| true` on both), but it's dead weight in the install script and misleads anyone reading it into thinking a scheduler service exists. Fix: drop those two lines.
 - **README + AGENTS.md both name the window class `MainWindow` — it's `ShaniBackupWindow`.** `src/shani_backup/ui/main_window.py:45` defines `class ShaniBackupWindow(Adw.Window)`; there is no `MainWindow` symbol anywhere (`grep -rn MainWindow .` excluding `.git` matches only prose). The GTK4 app class is `ShaniBackupApp(Adw.Application)` at `main_window.py:1544`, with its own `main()` entry point there — `cli.py:main()` is the CLI dispatch only and never constructs a window. Anyone following the docs to subclass or test the window will hit `ImportError`. Both files corrected to the real names.
 - **No `setup.py`/`pyproject.toml` — the app is not pip-installable.** The only install path is the `shani-backup` PKGBUILD wrapper (`/usr/bin/shani-backup` → `sys.path.insert(0, "/usr/share/shani-backup/src")` → `shani_backup.cli.main`). The README's `pip install -e .` instructions are impossible to follow as written. `PYTHONPATH=src python3 -m shani_backup.cli ...` is the real local invocation.
-- **Schema compiles but isn't installed in a bare checkout.** `glib-compile-schemas` on `data/org.shani.backup.gschema.xml` produces `gschemas.compiled` cleanly (verified), so the schema itself is valid — but the file ships under `data/`, not `/usr/share/glib-2.0/schemas/`, so running the app from source (`PYTHONPATH=src`) fails with `GLib-GIO-ERROR **: Settings schema 'org.shani.backup' is not installed` (exit 133) unless `XDG_SCHEMA_DIRS` is pointed at a compiled copy. The PKGBUILD's `post_install` does the real compile at package time; this is expected for a source checkout, but don't read a clean `app.run()` from source as a pass signal.
+- **Schema compiles but isn't installed in a bare checkout.** `glib-compile-schemas` on `data/org.shani.backup.gschema.xml` produces `gschemas.compiled` cleanly (verified), so the schema itself is valid — but the file ships under `data/`, not `/usr/share/glib-2.0/schemas/`, so running the app from source (`PYTHONPATH=src`) fails with `GLib-GIO-ERROR **: Settings schema 'org.shani.backup' is not installed` (exit 133) unless `GSETTINGS_SCHEMA_DIR` is pointed at a compiled copy. The PKGBUILD's `post_install` does the real compile at package time; this is expected for a source checkout, but don't read a clean `app.run()` from source as a pass signal.
 - **No LICENSE file (documented gap, needs maintainer decision).** `shani-pkgbuilds/shani-backup/PKGBUILD:9` declares `license=('GPL-3.0-only')`, but this repo ships no `LICENSE` file. The PKGBUILD's claim can't be verified against the tree. Add the actual file or correct the identifier — don't guess.
 
 ## Known gaps (needs maintainer decision)
@@ -105,7 +108,7 @@ rather than writing in a generic format.
   automated gates. Adding a tiny snapshot-logic test (against a throwaway
   loopback btrfs subvolume) would catch the regressions this utility is
   most prone to. Note: the GTK4 object-construction check below needs the
-  schema compiled first (`XDG_SCHEMA_DIRS`), or it errors at runtime
+  schema compiled first (`GSETTINGS_SCHEMA_DIR`), or it errors at runtime
   rather than import.
 - **Single `main_window.py`** — the GTK4 UI is one file (no templates);
   a regression in signal wiring is only visible in a real GUI run.
