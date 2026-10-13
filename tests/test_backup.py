@@ -95,6 +95,21 @@ print('constructed', type(built[0]).__name__)
 
 @pytest.fixture
 def btrfs_mount(tmp_path):
+    """A throwaway btrfs filesystem, or an honest skip.
+
+    **The mount is probed, not assumed.** `mkfs.btrfs` being present and the
+    process being root are not enough: a host with no loop devices - every
+    container, and a systemd-nspawn slot, where `/dev/loop-control` does not
+    exist - fails `mount -o loop` with exit 32. Before this was probed, those
+    hosts got four **errors** rather than four skips, which reads as "these tests
+    are broken here" rather than "these tests cannot run here", and it is why
+    shani-backup's suite was reported failing in-slot while nothing about it was.
+
+    The btrfs behaviour that cannot be measured without a loop device is measured
+    where a filesystem *is* available instead: `slot-tests/backup-snapshots.sh`
+    in shani-testbed drives this same module inside a real slot against a scratch
+    subvolume on the slot's own device.
+    """
     if os.geteuid() != 0 or not shutil.which("mkfs.btrfs"):
         pytest.skip("needs root and btrfs-progs (throwaway loopback fs)")
     img, mnt = tmp_path / "fs.img", tmp_path / "mnt"
@@ -102,11 +117,19 @@ def btrfs_mount(tmp_path):
         f.truncate(256 * 1024 * 1024)
     subprocess.run(["mkfs.btrfs", "-q", str(img)], check=True)
     mnt.mkdir()
-    subprocess.run(["mount", "-o", "loop", str(img), str(mnt)], check=True)
+    mounted = subprocess.run(["mount", "-o", "loop", str(img), str(mnt)],
+                             capture_output=True, text=True)
+    if mounted.returncode != 0:
+        # ENOENT from mount(8) here is the loop device, not the image.
+        pytest.skip(f"this host cannot mount a loopback filesystem "
+                    f"(mount -o loop exited {mounted.returncode}: "
+                    f"{(mounted.stderr or mounted.stdout).strip()[:90]}) - "
+                    f"btrfs behaviour is covered by shani-testbed's "
+                    f"backup-snapshots check")
     try:
         yield mnt
     finally:
-        subprocess.run(["umount", str(mnt)])
+        subprocess.run(["umount", str(mnt)], capture_output=True)
 
 
 def test_btrfs_snapshot_create_list_delete(btrfs_mount):
