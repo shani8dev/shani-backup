@@ -135,8 +135,58 @@ rather than writing in a generic format.
 - **`rclone` declared dependency with no usage anywhere — FIXED in packaging (2026-09-23, `shani-pkgbuilds/shani-backup` pkgrel 2, not yet committed there).** Removed from `depends=()` and `pkgdesc`; verified by a real `./make_pkg.sh shani-backup` build (`.PKGINFO` no longer lists it) and a real `pacman -U` into a clean `archlinux:latest` container (rclone not pulled in; `pacman -R` also clean). `data/shani-backup.desktop:9`'s `Keywords=` no longer lists `rclone` either (2026-09-23, `desktop-file-validate` clean). Note the PKGBUILD pins `#commit=`, so the keyword change only ships after that pin is bumped. Original finding: `shani-pkgbuilds/shani-backup/PKGBUILD:10` lists `rclone` in `depends=()`, but `grep -rn rclone src/ data/` returns zero matches — this repo shells out to `btrfs` (snapshots) and `restic` (directory backup) only, never `rclone`. Every install pulls in a ~30MB binary nothing uses. Confirmed by grep, not by assumption. Fix: remove `rclone` from `depends=()` and bump `pkgrel`.
 - **`shani-backup-scheduler.service` referenced by the `.install` hook but doesn't exist — FIXED (2026-09-23, same pkgrel 2).** `pre_remove()` dropped entirely (it only held those two lines); the real remove in the same container ran the remaining hooks with rc=0. Original finding: `shani-pkgbuilds/shani-backup/shani-backup.install:14-15` runs `systemctl stop/disable shani-backup-scheduler.service` in `pre_remove`, but no such unit ships anywhere — `grep -rn shani-backup-scheduler src/ data/` is empty, and there's no `systemd/` tree in this repo. Harmless (`|| true` on both), but it's dead weight in the install script and misleads anyone reading it into thinking a scheduler service exists. Fix: drop those two lines.
 - **README + AGENTS.md both name the window class `MainWindow` — it's `ShaniBackupWindow`.** `src/shani_backup/ui/main_window.py:45` defines `class ShaniBackupWindow(Adw.Window)`; there is no `MainWindow` symbol anywhere (`grep -rn MainWindow .` excluding `.git` matches only prose). The GTK4 app class is `ShaniBackupApp(Adw.Application)` at `main_window.py:1544`, with its own `main()` entry point there — `cli.py:main()` is the CLI dispatch only and never constructs a window. Anyone following the docs to subclass or test the window will hit `ImportError`. Both files corrected to the real names.
-- **No `setup.py`/`pyproject.toml` — the app is not pip-installable.** The only install path is the `shani-backup` PKGBUILD wrapper (`/usr/bin/shani-backup` → `sys.path.insert(0, "/usr/share/shani-backup/src")` → `shani_backup.cli.main`). The README's `pip install -e .` instructions are impossible to follow as written. `PYTHONPATH=src python3 -m shani_backup.cli ...` is the real local invocation.
+- **No `setup.py`/`pyproject.toml` — the app is not pip-installable.** The only install path is the `shani-backup` PKGBUILD wrapper (`/usr/bin/shani-backup` → `sys.path.insert(0, "/usr/share/shani-backup/src")` → `shani_backup.cli.main`). The README's `pip install -e .` instructions were removed (the README no longer claims it). `PYTHONPATH=src python3 -m shani_backup.cli ...` is the real local invocation.
 - **Schema compiles but isn't installed in a bare checkout.** `glib-compile-schemas` on `data/org.shani.backup.gschema.xml` produces `gschemas.compiled` cleanly (verified), so the schema itself is valid — but the file ships under `data/`, not `/usr/share/glib-2.0/schemas/`, so running the app from source (`PYTHONPATH=src`) fails with `GLib-GIO-ERROR **: Settings schema 'org.shani.backup' is not installed` (exit 133) unless `GSETTINGS_SCHEMA_DIR` is pointed at a compiled copy. The PKGBUILD's `post_install` does the real compile at package time; this is expected for a source checkout, but don't read a clean `app.run()` from source as a pass signal.
+- **`list_snapshots` returned paths that did not exist, on every real
+  filesystem — found 2026-10-14 by `slot-tests/backup-snapshots.sh` in
+  shani-testbed, on a real slot, and FIXED.** Shanios root is btrfs, so this is
+  the main path and not an edge case. `btrfs subvolume list <path>` names every
+  subvolume of the filesystem **relative to the subvolume that contains**
+  `<path>` — not relative to `<path>`, and not relative to the filesystem root.
+  The implementation joined those names onto `findmnt -T`'s mount point, which
+  is wrong in both directions, and both were measured rather than argued:
+
+  | asked about | old answer |
+  |---|---|
+  | a mount root | **every subvolume in the filesystem, at paths that do not exist** — 27 of them on the probe slot, including `@blue`, `@green` and `@home` |
+  | a subvolume inside that mount | **nothing at all** — every name failed the prefix filter |
+
+  The consequence is not cosmetic and it is a safety problem: the Snapshots tab
+  hands a returned path straight to `btrfs subvolume delete`, so the list was
+  offering deletions of paths that do not exist, while presenting the slot's own
+  system subvolumes as if they were the user's backups. The base is now the
+  queried path itself (the names are relative to the containing subvolume, so
+  that is where they belong) and every candidate is kept only if it **exists** —
+  a `stat`, not a subprocess, so it costs nothing on the GTK main thread. The
+  rejected entries are counted and reported as `elsewhere` in the JSON, because
+  they are real subvolumes of the filesystem that simply are not under the path
+  asked about; a zero count beside an empty list would otherwise mean "and the
+  other 26 are somewhere you did not ask about".
+
+  **Two limits are deliberate, not oversights.** A path that is neither a
+  subvolume nor a mount root cannot have its subvolumes named at all — the names
+  are relative to a subvolume whose absolute location this process cannot know
+  without mounting subvolume 5 — so the listing says so in its `note` instead of
+  returning a bare empty list. And on a slot the query for `/` answers
+  `ERROR: not a btrfs filesystem: /` (nspawn's root is not a subvolume), which
+  is reported as a refusal rather than as an empty machine.
+
+  **The probe measures six things and every one of them changed the fix**, which
+  is why it is a harness check and not a note: it proved that `create_snapshot`
+  must check `is_btrfs_path` (a plain directory inside a subvolume is refused by
+  btrfs, and most of `/home` is one); that a snapshot cannot cross a filesystem
+  (measured against a tmpfs); that the tab's sibling-of-source default is fine
+  for an ordinary subvolume but has nowhere to go for a top-level one; and — the
+  one that was **not** a defect — that deleting a `--readonly` snapshot works
+  fine on btrfs-progs 7.1, so the Delete button can remove what Create makes.
+  It also found the slot has **no loop devices at all** (`/dev/loop-control`
+  absent), so `mount -o loop` answers ENOENT and the probe falls back to a
+  scratch subvolume under the slot's own root, which it removes on exit. Two
+  probe bugs of its own were caught by running it: a fixture that created
+  `data/inner` *before* `subvolume create data` (so claims 2 and 3 were answered
+  about a path that was not a subvolume), and `printf %q` emitting bare paths
+  into a generated Python string, which reported three SyntaxErrors as findings
+  about this code. **A probe whose fixture is wrong is worse than no probe.**
 - **No LICENSE file (documented gap, needs maintainer decision).** `shani-pkgbuilds/shani-backup/PKGBUILD:9` declares `license=('GPL-3.0-only')`, but this repo ships no `LICENSE` file. The PKGBUILD's claim can't be verified against the tree. Add the actual file or correct the identifier — don't guess.
 
 ## Known gaps (needs maintainer decision)
@@ -146,14 +196,32 @@ rather than writing in a generic format.
   PKGBUILD already claims `GPL-3.0-only`, so the likely answer is to add
   that file rather than change the identifier — but confirm with the
   maintainer before committing either way.
-- **No CI / no tests** — `py_compile` + a CLI smoke test are the only
-  automated gates. Adding a tiny snapshot-logic test (against a throwaway
-  loopback btrfs subvolume) would catch the regressions this utility is
-  most prone to. Note: the GTK4 object-construction check below needs the
-  schema compiled first (`GSETTINGS_SCHEMA_DIR`), or it errors at runtime
-  rather than import.
+- **Still not pip-installable** — there is no `setup.py`/`pyproject.toml`,
+  so the only install path is the PKGBUILD wrapper. (This bullet used to
+  also claim the README's `pip install -e .` instructions were impossible to
+  follow; the README no longer contains them, so that half was stale.)
 - **Single `main_window.py`** — the GTK4 UI is one file (no templates);
   a regression in signal wiring is only visible in a real GUI run.
+
+### Closed since this list was written (2026-10-14)
+
+- **"No CI / no tests" is no longer true, and the entry above was the stale
+  artefact.** `tests/test_backup.py` runs CLI dispatch, the GSettings schema,
+  real GTK4 window construction and a real btrfs snapshot
+  create/list/delete against a throwaway loopback filesystem, under
+  `.github/workflows/ci.yml` (lint, test on Xvfb, secrets scan) via
+  `shani-ci-commons`. The btrfs tests skip without root, which is why CI runs
+  them a second time as root. What remains uncovered is noted where it remains
+  uncovered — see the btrfs probe entry below.
+- **The five GUI/CLI defects found on 2026-10-14 are fixed, each with a test
+  and a control that was run:** the header's status indicator could never leave
+  "Ready" (its name was assigned a second time by the Backup tab, so every
+  update went to the card's dot instead); the Restore tab opened empty and
+  greyed until Refresh was pressed; two restore checkboxes were read by nothing
+  and are gone; the version string was hardcoded twice; and **`_delete_snapshot`
+  destroyed a subvolume on a single click with no confirmation**, which on a
+  btrfs OS means one mis-click removes a system subvolume. It now confirms with
+  the full path, and refuses to delete the path the list is showing.
 
 ## Cross-repo impact
 `shani-pkgbuilds/shani-backup/PKGBUILD` packages this repo's `src/` and

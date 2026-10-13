@@ -4,12 +4,33 @@ Command-line interface for Shani Backup.
 """
 
 import argparse
+import json
 import subprocess
 import sys
 import os
 from . import __version__
 from . import btrfs
 from .config import get_config, apply_config_defaults
+
+
+def _json_out(payload, ok: bool) -> int:
+    """Emit one JSON object on stdout and return the exit code.
+
+    Every subcommand accepts `--json`, because the GUI in Cassini that now drives
+    these operations needs an answer it can branch on rather than English prose:
+    the page that used to live here was deleted for parsing `snapshot list`
+    output that was never JSON. So the shape is fixed and never varied:
+
+      ok: true   - "error" is absent
+      ok: false  - "error" is present, in this tool's own words, and is never
+                   invented at the call site (see btrfs.Result.detail)
+
+    stdout carries the object and nothing else, so a caller can parse it without
+    having to strip progress chatter; the human-readable text is only printed
+    when `--json` was not asked for.
+    """
+    print(json.dumps(payload))
+    return 0 if ok else 1
 
 
 def main():
@@ -27,6 +48,10 @@ def main():
     backup_parser.add_argument(
         "--destination", help="Destination for the backup"
     )
+    backup_parser.add_argument(
+        "--json", action="store_true",
+        help="Machine-readable output: one JSON object on stdout"
+    )
 
     # Restore command
     restore_parser = subparsers.add_parser("restore", help="Restore from a backup")
@@ -35,6 +60,10 @@ def main():
     )
     restore_parser.add_argument(
         "target", help="Target directory to restore to"
+    )
+    restore_parser.add_argument(
+        "--json", action="store_true",
+        help="Machine-readable output: one JSON object on stdout"
     )
 
     # Snapshot command
@@ -48,14 +77,26 @@ def main():
     create_parser.add_argument(
         "--readonly", action="store_true", help="Create a read-only snapshot"
     )
+    create_parser.add_argument(
+        "--json", action="store_true",
+        help="Machine-readable output: one JSON object on stdout"
+    )
 
     # Snapshot list
     list_parser = snapshot_subparsers.add_parser("list", help="List snapshots")
     list_parser.add_argument("path", help="Path to list snapshots from")
+    list_parser.add_argument(
+        "--json", action="store_true",
+        help="Machine-readable output: one JSON object on stdout"
+    )
 
     # Snapshot delete
     delete_parser = snapshot_subparsers.add_parser("delete", help="Delete a snapshot")
     delete_parser.add_argument("snapshot", help="Snapshot path to delete")
+    delete_parser.add_argument(
+        "--json", action="store_true",
+        help="Machine-readable output: one JSON object on stdout"
+    )
 
     # Schedule command
     schedule_parser = subparsers.add_parser("schedule", help="Manage backup schedule")
@@ -88,14 +129,32 @@ def main():
         # Use restic to backup the source directory
         cmd = ["restic", "backup", args.source, "--repo", backup_location]
         try:
-            print(f"Starting backup of {args.source} to {backup_location}...")
-            subprocess.run(cmd, check=True)
-            print(f"Backup of {args.source} completed successfully.")
-            print(f"Repository: {backup_location}")
-        except subprocess.CalledProcessError as e:
-            print(f"Backup failed: {e}")
+            if not args.json:
+                print(f"Starting backup of {args.source} to {backup_location}...")
+            # restic's own stderr is captured so a failure can report *why*: the
+            # old code printed "Command '[...]' returned non-zero exit status 1",
+            # which is the shell's phrasing, not a reason (a missing repository,
+            # a wrong password and an unreachable disk all read the same).
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            if proc.returncode == 0:
+                if args.json:
+                    sys.exit(_json_out({"ok": True, "source": args.source,
+                                        "repository": backup_location}, True))
+                print(f"Backup of {args.source} completed successfully.")
+                print(f"Repository: {backup_location}")
+                return
+            reason = (proc.stderr or proc.stdout or "").strip().splitlines()
+            detail = reason[-1].strip() if reason else f"restic exited {proc.returncode}"
+            if args.json:
+                sys.exit(_json_out({"ok": False, "source": args.source,
+                                    "repository": backup_location, "error": detail},
+                                   False))
+            print(f"Backup failed: {detail}")
             sys.exit(1)
         except FileNotFoundError:
+            if args.json:
+                sys.exit(_json_out({"ok": False, "error": "restic is not installed"},
+                                   False))
             print("Error: restic command not found. Please install restic.")
             sys.exit(1)
     elif args.command == "restore":
@@ -119,26 +178,79 @@ def main():
         # In a real implementation, we would let the user choose which snapshot to restore
         cmd = ["restic", "restore", "latest", "--target", args.target, "--repo", repository]
         try:
-            print(f"Starting restore from {repository} to {args.target}...")
-            subprocess.run(cmd, check=True)
-            print(f"Restored latest snapshot to {args.target}.")
-            print(f"Repository: {repository}")
-        except subprocess.CalledProcessError as e:
-            print(f"Restore failed: {e}")
+            if not args.json:
+                print(f"Starting restore from {repository} to {args.target}...")
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            if proc.returncode == 0:
+                if args.json:
+                    sys.exit(_json_out({"ok": True, "repository": repository,
+                                        "target": args.target, "snapshot": "latest"},
+                                       True))
+                print(f"Restored latest snapshot to {args.target}.")
+                print(f"Repository: {repository}")
+                return
+            reason = (proc.stderr or proc.stdout or "").strip().splitlines()
+            detail = reason[-1].strip() if reason else f"restic exited {proc.returncode}"
+            if args.json:
+                sys.exit(_json_out({"ok": False, "repository": repository,
+                                    "target": args.target, "error": detail}, False))
+            print(f"Restore failed: {detail}")
             sys.exit(1)
         except FileNotFoundError:
+            if args.json:
+                sys.exit(_json_out({"ok": False, "error": "restic is not installed"},
+                                   False))
             print("Error: restic command not found. Please install restic.")
             sys.exit(1)
     elif args.command == "snapshot":
         if args.snapshot_command == "create":
-            success = btrfs.create_snapshot(args.source, args.destination, args.readonly)
-            if success:
+            # The detailed form, because the plain bool throws away the reason and
+            # the reason is almost always what the user needs: on a btrfs OS the
+            # source is usually not a subvolume, or the destination is on another
+            # filesystem.
+            result = btrfs.create_snapshot_detailed(
+                args.source, args.destination, args.readonly
+            )
+            if args.json:
+                sys.exit(_json_out(
+                    {"ok": result.ok, "source": args.source,
+                     "destination": args.destination, "readonly": args.readonly,
+                     **({} if result.ok else {"error": result.detail})},
+                    result.ok,
+                ))
+            if result.ok:
                 print(f"Created snapshot of {args.source} at {args.destination}")
             else:
-                print(f"Failed to create snapshot")
+                print(f"Failed to create snapshot: {result.detail}")
                 sys.exit(1)
         elif args.snapshot_command == "list":
-            snapshots = btrfs.list_snapshots(args.path)
+            listing = btrfs.list_snapshots_detailed(args.path)
+            if args.json:
+                # `ok:false` for a read that never answered, so a caller can tell
+                # "there are none" from "btrfs said nothing" - an empty list beside
+                # a zero count is the most reassuring lie available on this page.
+                sys.exit(_json_out(
+                    {"ok": listing.ok, "path": args.path,
+                     "snapshots": listing.paths if listing.ok else [],
+                     "count": len(listing.paths) if listing.ok else None,
+                     # Subvolumes the tool listed that are not under this path and
+                     # so have no absolute path to hand a caller. Reported so that
+                     # an empty list beside a zero count cannot mean "and the rest
+                     # of the filesystem is somewhere you did not ask about".
+                     "elsewhere": listing.dropped if listing.ok else None,
+                     "note": listing.note if listing.ok else None,
+                     **({} if listing.ok else {"error": listing.detail})},
+                    listing.ok))
+            snapshots = listing.paths
+            if listing.ok and not snapshots and listing.note:
+                print(listing.note)
+            elif listing.ok and not snapshots:
+                print(f"Could not list snapshots under {args.path}: {listing.detail}")
+                sys.exit(1)
+            elif listing.ok and listing.dropped:
+                print(f"{len(snapshots)} under {args.path}; {listing.dropped} "
+                      "subvolume(s) elsewhere in this filesystem are not under "
+                      "it, so they cannot be listed here")
             if snapshots:
                 print("Snapshots:")
                 for snap in snapshots:
@@ -146,11 +258,17 @@ def main():
             else:
                 print("No snapshots found.")
         elif args.snapshot_command == "delete":
-            success = btrfs.delete_snapshot(args.snapshot)
-            if success:
+            result = btrfs.delete_snapshot_detailed(args.snapshot)
+            if args.json:
+                sys.exit(_json_out(
+                    {"ok": result.ok, "snapshot": args.snapshot,
+                     **({} if result.ok else {"error": result.detail})},
+                    result.ok,
+                ))
+            if result.ok:
                 print(f"Deleted snapshot {args.snapshot}")
             else:
-                print(f"Failed to delete snapshot {args.snapshot}")
+                print(f"Failed to delete snapshot {args.snapshot}: {result.detail}")
                 sys.exit(1)
         else:
             snapshot_parser.print_help()

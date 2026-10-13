@@ -15,8 +15,11 @@ from datetime import datetime
 from typing import Optional, List
 from enum import Enum
 
+from shani_backup import __version__
 from shani_backup.config import get_config, apply_config_defaults
-from shani_backup.btrfs import list_snapshots, create_snapshot, delete_snapshot
+from shani_backup.btrfs import (list_snapshots, create_snapshot,
+                              delete_snapshot, create_snapshot_detailed,
+                              delete_snapshot_detailed)
 
 __all__ = ['ShaniBackupWindow']
 
@@ -68,8 +71,12 @@ class ShaniBackupWindow(Adw.Window):
         self._setup_navigation()
         self._setup_status_bar()
         
-        # Load initial data
+        # Load initial data. _refresh_backup_list() is here too: without it the
+        # Restore tab opened with an empty repository combo and a greyed "Start
+        # Restore" even when a repository *was* configured, so the tab looked
+        # broken until somebody pressed Refresh.
         self._refresh_backup_location()
+        self._refresh_backup_list()
         self._update_scheduler_status()
         self._refresh_snapshot_list()
         
@@ -166,11 +173,18 @@ class ShaniBackupWindow(Adw.Window):
         icon.set_pixel_size(24)
         header.set_title_widget(icon)
         
-        # Status indicator in header
-        self.status_indicator = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, 4)
-        self.status_indicator.add_css_class("status-indicator")
-        self.status_indicator.add_css_class("status-ready")
-        
+        # Status indicator in header. Named header_status_indicator, not
+        # status_indicator: the Backup tab's progress card builds its own
+        # indicator under that name in _create_enhanced_backup_tab(), and since
+        # the tabs are built AFTER this header, a shared name meant the header's
+        # box was thrown away - the one in the header is then never styled and
+        # never updated, so it said "● Ready" for ever, through a running
+        # backup and through a failure. The two indicators now have separate
+        # names and separate labels, and both are updated.
+        self.header_status_indicator = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, 4)
+        self.header_status_indicator.add_css_class("status-indicator")
+        self.header_status_indicator.add_css_class("status-ready")
+
         # Named header_status_label (not status_label): the bottom status
         # bar (_setup_status_bar) uses self.status_label for its own,
         # unrelated label, and is set up after this one - reusing the name
@@ -178,10 +192,10 @@ class ShaniBackupWindow(Adw.Window):
         # updating this static header indicator instead of the operational
         # status message it's actually meant for.
         self.header_status_label = Gtk.Label.new("● Ready")
-        self.status_indicator.append(self.header_status_label)
-        
+        self.header_status_indicator.append(self.header_status_label)
+
         status_button = Gtk.Button.new()
-        status_button.set_child(self.status_indicator)
+        status_button.set_child(self.header_status_indicator)
         status_button.add_css_class("flat")
         status_button.connect("clicked", self._show_status_dialog)
         header.pack_end(status_button)
@@ -492,32 +506,29 @@ class ShaniBackupWindow(Adw.Window):
         snapshot_frame.set_child(snapshot_box)
         options_box.append(snapshot_frame)
         
-        # Restore options
+        # Restore options. The two checkboxes that used to be here ("Overwrite
+        # existing files", "Preserve file attributes") were read by nothing -
+        # _start_restore_operation never looked at them and restic has no flag
+        # for either, so ticking a box that looks like a safety setting silently
+        # changed nothing about a restore that overwrites a target directory.
+        # They are gone rather than greyed out, because a disabled control still
+        # asks the question. What restic actually does is now said instead.
         restore_options_frame = Gtk.Expander.new("Restore Options")
         restore_options_frame.set_expanded(True)
-        
+
         restore_options_grid = Gtk.Grid.new()
         restore_options_grid.set_row_spacing(8)
         restore_options_grid.set_column_spacing(8)
-        
-        # Options checkboxes
-        overwrite_label = Gtk.Label.new("Overwrite existing files:")
-        overwrite_label.set_halign(Gtk.Align.START)
-        
-        self.overwrite_check = Gtk.CheckButton.new_with_label("Overwrite")
-        self.overwrite_check.set_active(True)
-        
-        preserve_attr_label = Gtk.Label.new("Preserve file attributes:")
-        preserve_attr_label.set_halign(Gtk.Align.START)
-        
-        self.preserve_attr_check = Gtk.CheckButton.new_with_label("Preserve")
-        self.preserve_attr_check.set_active(True)
-        
-        restore_options_grid.attach(overwrite_label, 0, 0, 1, 1)
-        restore_options_grid.attach(self.overwrite_check, 1, 0, 1, 1)
-        restore_options_grid.attach(preserve_attr_label, 0, 1, 1, 1)
-        restore_options_grid.attach(self.preserve_attr_check, 1, 1, 1, 1)
-        
+
+        restore_note = Gtk.Label.new(
+            "restic restores the latest snapshot over the target directory and "
+            "keeps the attributes stored in the snapshot; there is no option to "
+            "turn either off. Restore into an empty directory unless you mean to "
+            "replace what is there.")
+        restore_note.set_wrap(True)
+        restore_note.set_halign(Gtk.Align.START)
+        restore_options_grid.attach(restore_note, 0, 0, 2, 1)
+
         restore_options_frame.set_child(restore_options_grid)
         options_box.append(restore_options_frame)
         
@@ -900,7 +911,7 @@ class ShaniBackupWindow(Adw.Window):
         self.connection_indicator.append(self.connection_label)
 
         # Version info
-        self.version_label = Gtk.Label.new("v0.0.1")
+        self.version_label = Gtk.Label.new(f"v{__version__}")
         self.version_label.add_css_class("dim-label")
         self.version_label.set_margin_start(12)
 
@@ -1027,10 +1038,10 @@ class ShaniBackupWindow(Adw.Window):
         self.source_entry.set_sensitive(False)
         self.location_entry.set_sensitive(False)
         
-        # Update progress indicators
+        # Update progress indicators. Both of them: the card's and the header's.
         self.progress_status_label.set_text("Starting backup...")
-        self.status_indicator.remove_css_class("status-ready")
-        self.status_indicator.add_css_class("status-running")
+        self._set_status_indicator(self.status_indicator, "status-running")
+        self._set_header_status("Running", "status-running")
         
         self.progress_bar.set_fraction(0.1)
         self.progress_bar.set_text("10%")
@@ -1049,6 +1060,32 @@ class ShaniBackupWindow(Adw.Window):
         
         self.status_label.set_text(f"Backup started: {source} -> {location}")
         
+    @staticmethod
+    def _set_status_indicator(box, css_class):
+        """Move a status dot to one state, dropping the other three.
+
+        The four state classes are mutually exclusive, so removing only the one
+        being left behind would leave a dot that is "completed" and "running" at
+        the same time and colours by whichever rule wins.
+        """
+        for state in ("status-ready", "status-running", "status-completed",
+                      "status-failed"):
+            if state != css_class:
+                box.remove_css_class(state)
+        box.add_css_class(css_class)
+
+    def _set_header_status(self, text, css_class="status-ready"):
+        """The header's own indicator and label.
+
+        This is the half that was dead: the card's indicator was assigned to
+        `self.status_indicator` a second time in _create_enhanced_backup_tab(),
+        so every "update the indicator" call below updated the card's dot and the
+        header's dot kept saying "● Ready" through a running backup and through a
+        failure. Both are named and both are updated now.
+        """
+        self.header_status_label.set_text(f"● {text}")
+        self._set_status_indicator(self.header_status_indicator, css_class)
+
     def _run_backup_with_progress(self, job):
         """Run backup with progress updates."""
         try:
@@ -1080,8 +1117,8 @@ class ShaniBackupWindow(Adw.Window):
     def _update_backup_ui_completed(self, job):
         """Update UI when backup completes successfully."""
         self.progress_status_label.set_text("Backup completed successfully")
-        self.status_indicator.remove_css_class("status-running")
-        self.status_indicator.add_css_class("status-completed")
+        self._set_status_indicator(self.status_indicator, "status-completed")
+        self._set_header_status("Completed", "status-completed")
         
         self.progress_bar.set_fraction(1.0)
         self.progress_bar.set_text("100%")
@@ -1099,8 +1136,8 @@ class ShaniBackupWindow(Adw.Window):
     def _update_backup_ui_failed(self, job):
         """Update UI when backup fails."""
         self.progress_status_label.set_text(f"Backup failed: {job.error}")
-        self.status_indicator.remove_css_class("status-running")
-        self.status_indicator.add_css_class("status-failed")
+        self._set_status_indicator(self.status_indicator, "status-failed")
+        self._set_header_status("Failed", "status-failed")
         
         self.status_label.set_text(f"Backup failed: {job.error}")
         
@@ -1150,8 +1187,6 @@ class ShaniBackupWindow(Adw.Window):
     def _clear_restore_form(self, button):
         """Reset the restore form to its defaults."""
         self.target_entry.set_text("/tmp/restore")
-        self.overwrite_check.set_active(True)
-        self.preserve_attr_check.set_active(True)
         self.restore_progress_bar.set_fraction(0.0)
         self.restore_progress_bar.set_text("0%")
         self.status_label.set_text("Restore form cleared")
@@ -1272,23 +1307,69 @@ class ShaniBackupWindow(Adw.Window):
             return
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         destination = f"{source.rstrip('/')}-snapshot-{timestamp}"
-        if create_snapshot(source, destination, readonly=True):
+        result = create_snapshot_detailed(source, destination, readonly=True)
+        if result.ok:
             self.status_label.set_text(f"Snapshot created: {destination}")
             self._refresh_snapshot_list()
         else:
-            self.status_label.set_text(f"Failed to create snapshot of {source}")
+            self.status_label.set_text(f"Cannot create snapshot: {result.detail}")
 
     def _delete_snapshot(self, button):
-        """Delete the currently selected snapshot."""
+        """Delete the selected snapshot, after a confirmation that names it.
+
+        This is the one button in the app that destroys something, and it used to
+        do it on a single click with no question asked. On a btrfs OS the list it
+        deletes from contains *system* subvolumes - a real slot's `btrfs subvolume
+        list /` returns @blue, @green, @home and the rest - so a mis-click removes
+        a system subvolume with no way back. Two rules:
+
+        * the path is named in the dialog, in full, because the path *is* what
+          gets destroyed and a list row is a truncated view of it;
+        * the path being pointed at is never deletable from its own list. Typing
+          `/` and pressing Delete would otherwise offer to delete `/`.
+        """
         if not self._selected_snapshot:
             self.status_label.set_text("No snapshot selected")
             return
         target = self._selected_snapshot
-        if delete_snapshot(target):
+        browse_path = (self.snapshot_path_entry.get_text().strip().rstrip("/")
+                       or "/")
+        if os.path.abspath(target) == os.path.abspath(browse_path):
+            self.status_label.set_text(
+                f"Refusing to delete {target}: that is the path this list is "
+                "showing, not a snapshot of it")
+            return
+        if not self._confirm_delete(target):
+            self.status_label.set_text("Delete cancelled")
+            return
+        result = delete_snapshot_detailed(target)
+        if result.ok:
             self.status_label.set_text(f"Deleted snapshot: {target}")
             self._refresh_snapshot_list()
         else:
-            self.status_label.set_text(f"Failed to delete snapshot: {target}")
+            self.status_label.set_text(f"Could not delete {target}: {result.detail}")
+
+    def _confirm_delete(self, target):
+        """Ask, with the full path in the message. True only for "Delete".
+
+        `Gtk.AlertDialog.choose()` is the one whose answer is a *value*, and that
+        is the whole reason it is used here: the answer has to arrive before
+        `btrfs subvolume delete` runs, and a `present()`ed dialog with a response
+        handler cannot give one back to a GTK callback that is already returning.
+
+        Constructed with keyword properties rather than `.new()`: PyGObject does
+        not bind a no-argument constructor for this final class (`.new()` and
+        `.newv()` both raise), and GTK 4.10 - the floor this app can rely on, and
+        what Ubuntu 24.04's CI runs - has it.
+        """
+        dialog = Gtk.AlertDialog(
+            message="Delete this subvolume?",
+            detail=(f"{target}\n\n"
+                    "A btrfs subvolume and everything in it is removed. This "
+                    "cannot be undone from here."),
+            modal=True,
+        )
+        return bool(dialog.choose(self, None, "Delete", "Cancel"))
 
     # ── scheduler tab ────────────────────────────────────────────────────
 
@@ -1378,7 +1459,7 @@ class ShaniBackupWindow(Adw.Window):
         title_label = Gtk.Label.new("Shani Backup")
         title_label.add_css_class("title-1")
         
-        version_label = Gtk.Label.new("Version 0.0.1")
+        version_label = Gtk.Label.new(f"Version {__version__}")
         version_label.add_css_class("title-4")
         version_label.add_css_class("dim-label")
         
