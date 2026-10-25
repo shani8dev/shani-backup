@@ -145,14 +145,35 @@ def test_btrfs_snapshot_create_list_delete(btrfs_mount):
     ro = subprocess.run(["btrfs", "property", "get", str(snap), "ro"], capture_output=True, text=True)
     assert "ro=true" in ro.stdout
 
+    # `snapshot list` can name subvolumes by path only from the subvolume that
+    # CONTAINS the path asked about (see list_snapshots_detailed). On this
+    # loopback mount that container is the mount root itself, which holds
+    # exactly two subvolumes - src and the new snapshot - both with absolute
+    # paths that exist.
+    r = cli("snapshot", "list", str(btrfs_mount))
+    assert str(snap) in r.stdout, r.stdout
+    assert str(src) in r.stdout, r.stdout
+
+    # A plain directory inside that container is not a subvolume and not a
+    # mount point, so its filesystem's subvolumes cannot be named by path from
+    # it at all. The refusal is said out loud, and NOT A SINGLE PATH is offered
+    # - reporting a path this process cannot name was the 2026-10-14 defect
+    # found on a real slot, where the same read offered 27 of them.
     r = cli("snapshot", "list", str(snaps))
-    assert str(snap) in r.stdout
-    assert str(src) not in r.stdout  # only what is under the given path
+    assert "is not a btrfs subvolume" in r.stdout, r.stdout
+    assert "No snapshots found." in r.stdout, r.stdout
+    assert str(snap) not in r.stdout
+    assert str(src) not in r.stdout
 
     r = cli("snapshot", "delete", str(snap))
     assert r.returncode == 0, r.stdout + r.stderr
     assert not snap.exists()
-    assert "No snapshots found." in cli("snapshot", "list", str(snaps)).stdout
+    # The same read that produced the path no longer names it, and the plain
+    # directory still says why it can say nothing instead of claiming empty.
+    assert str(snap) not in cli("snapshot", "list", str(btrfs_mount)).stdout
+    r = cli("snapshot", "list", str(snaps))
+    assert "No snapshots found." in r.stdout
+    assert "is not a btrfs subvolume" in r.stdout
 
 
 def test_btrfs_snapshot_of_missing_source_fails(btrfs_mount):
