@@ -505,3 +505,19 @@ def test_set_up_keeps_the_password_in_the_keyring(tmp_path, monkeypatch):
         assert ok and len(snaps) == 1, why
     finally:
         subprocess.run(["secret-tool", "clear", "app", "shani-backup", "repository", repo], capture_output=True)
+
+
+def test_a_subvolume_home_is_not_listed_from_the_whole_snapshots(tmp_path, monkeypatch):
+    """Its folder in a whole-/home snapshot is empty (a snapshot stops at a nested
+    subvolume), so offering it would be an earlier version with nothing in it."""
+    sys.path.insert(0, str(REPO / "src"))
+    from shani_backup import home
+    monkeypatch.setattr(home, "HOME", str(tmp_path))
+    (tmp_path / ".snapshots" / "@home" / "daily-2026-10-29" / "bob").mkdir(parents=True)
+    (tmp_path / ".snapshots" / "@home" / "daily-2026-10-29" / "alice").mkdir(parents=True)
+    (tmp_path / ".snapshots" / "bob" / "daily-2026-10-29").mkdir(parents=True)
+    (tmp_path / "alice").mkdir()
+    (tmp_path / "bob").mkdir()
+    monkeypatch.setattr(home, "_is_subvolume", lambda p: p.endswith("/bob"))
+    assert [s.whole for s in home.list_for("bob")] == [False]
+    assert [s.whole for s in home.list_for("alice")] == [True]

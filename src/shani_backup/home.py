@@ -30,7 +30,7 @@ Layout:
     /home/.snapshots/<user>/                root 0700 + ACL u:<user>:r-x
     /home/.snapshots/<user>/daily-2026-10-29
     /home/.snapshots/<user>/manual-2026-10-29_14-05-09
-    /home/.snapshots/@home/                 root 0711
+    /home/.snapshots/@home/                 root 0755 (the names are dates)
     /home/.snapshots/@home/daily-2026-10-29/<user>/...
 """
 
@@ -148,7 +148,10 @@ def snapshot_whole(kind: str = "manual", now=None) -> Result:
         return Result(False, "taking a snapshot needs root")
     if not btrfs.is_btrfs_path(HOME):
         return Result(False, f"{HOME} is not a btrfs subvolume, so its homes cannot be snapshotted")
-    for path, mode in ((snapshot_root(), 0o711), (os.path.join(snapshot_root(), ALL), 0o711)):
+    # @home readable (0755): a snapshot's name is only a date, and each home
+    # inside keeps its own owner and mode - with 0711 an ordinary person could
+    # not list it, and their Your Files failed (measured in the slot test)
+    for path, mode in ((snapshot_root(), 0o711), (os.path.join(snapshot_root(), ALL), 0o755)):
         err = _safe_dir(path, mode, create=True)
         if err:
             return Result(False, err)
@@ -220,13 +223,32 @@ def list_for(user: str) -> list:
             names = []
         out += [Snapshot(n, os.path.join(own, n), False) for n in names]
     whole = os.path.join(snapshot_root(), ALL)
-    if os.path.isdir(whole) and not os.path.islink(whole):
-        for n in os.listdir(whole):
+    # a home that is its own subvolume is not in the whole-/home snapshots at
+    # all - a snapshot stops at a nested subvolume, leaving an empty folder
+    # there - so only its own snapshots hold it (measured in the slot test:
+    # listing that empty folder offered an "earlier version" with no files)
+    if _is_subvolume(os.path.join(HOME, user)):
+        whole = ""
+    if whole and os.path.isdir(whole) and not os.path.islink(whole):
+        try:
+            names = os.listdir(whole)
+        except PermissionError:
+            names = []
+        for n in names:
             p = os.path.join(whole, n, user)
             if os.path.isdir(p):
                 out.append(Snapshot(n, p, True))
     # daily-YYYY-MM-DD and manual-YYYY-MM-DD_… sort by their date part
     return sorted(out, key=lambda s: s.name.split("-", 1)[1], reverse=True)
+
+
+def _is_subvolume(path: str) -> bool:
+    """A btrfs subvolume's root directory has inode 256 - the check that needs
+    no privilege (`btrfs subvolume show` may refuse an ordinary user)."""
+    try:
+        return os.stat(path).st_ino == 256 and os.path.isdir(path)
+    except OSError:
+        return False
 
 
 def remove(user: str, name: str) -> Result:
