@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily snapshots of home folders
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=30min
+# a day the computer was off is made up at the next boot
+Persistent=true
+
+[Install]
+WantedBy=timers.target

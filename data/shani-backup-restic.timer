@@ -1,0 +1,12 @@
+[Unit]
+Description=Back up your home folder every day
+
+[Timer]
+# the time is the person's: Backups > Schedule writes a drop-in (time.conf)
+OnCalendar=*-*-* 12:30:00
+RandomizedDelaySec=10min
+# a day the computer was off or asleep is made up at the next chance
+Persistent=true
+
+[Install]
+WantedBy=timers.target

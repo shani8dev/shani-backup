@@ -4,6 +4,7 @@ GSettings integration module for Shani Backup.
 Integrates with org.shani.backup GSettings schema for configuration management.
 """
 
+import sys
 import gi
 gi.require_version('Gio', '2.0')
 from gi.repository import Gio
@@ -31,9 +32,8 @@ class BackupConfig:
         """Initialize GSettings with the schema."""
         try:
             self._settings = Gio.Settings.new(SCHEMA_ID)
-            print(f"GSettings initialized for schema: {SCHEMA_ID}")
         except Exception as e:
-            print(f"Warning: Failed to initialize GSettings: {e}")
+            print(f"Warning: Failed to initialize GSettings: {e}", file=sys.stderr)
             self._settings = None
 
     def get_backup_location(self) -> Optional[str]:
@@ -48,7 +48,7 @@ class BackupConfig:
         try:
             return self._settings.get_string('backup-location')
         except Exception as e:
-            print(f"Error getting backup location: {e}")
+            print(f"Error getting backup location: {e}", file=sys.stderr)
             return None
 
     def set_backup_location(self, location: str) -> bool:
@@ -67,7 +67,7 @@ class BackupConfig:
             self._settings.set_string('backup-location', location)
             return True
         except Exception as e:
-            print(f"Error setting backup location: {e}")
+            print(f"Error setting backup location: {e}", file=sys.stderr)
             return False
 
     def get_scheduler_enabled(self) -> Optional[bool]:
@@ -83,7 +83,7 @@ class BackupConfig:
         try:
             return self._settings.get_boolean('enable-scheduler')
         except Exception as e:
-            print(f"Error getting scheduler enabled state: {e}")
+            print(f"Error getting scheduler enabled state: {e}", file=sys.stderr)
             return None
 
     def set_scheduler_enabled(self, enabled: bool) -> bool:
@@ -102,7 +102,7 @@ class BackupConfig:
             self._settings.set_boolean('enable-scheduler', enabled)
             return True
         except Exception as e:
-            print(f"Error setting scheduler enabled state: {e}")
+            print(f"Error setting scheduler enabled state: {e}", file=sys.stderr)
             return False
 
     def get_schedule_time(self) -> Optional[str]:
@@ -117,7 +117,7 @@ class BackupConfig:
         try:
             return self._settings.get_string('schedule-time')
         except Exception as e:
-            print(f"Error getting schedule time: {e}")
+            print(f"Error getting schedule time: {e}", file=sys.stderr)
             return None
 
     def set_schedule_time(self, time_str: str) -> bool:
@@ -136,7 +136,7 @@ class BackupConfig:
             self._settings.set_string('schedule-time', time_str)
             return True
         except Exception as e:
-            print(f"Error setting schedule time: {e}")
+            print(f"Error setting schedule time: {e}", file=sys.stderr)
             return False
 
     def validate_schedule_time(self, time_str: str) -> bool:
@@ -192,7 +192,7 @@ class BackupConfig:
             from .btrfs import is_btrfs_path
             return is_btrfs_path(snapshot) and delete_snapshot(snapshot)
         except Exception as e:
-            print(f"Error checking if snapshot can be deleted: {e}")
+            print(f"Error checking if snapshot can be deleted: {e}", file=sys.stderr)
             return False
 
     def get_all_settings(self) -> dict:
@@ -211,7 +211,7 @@ class BackupConfig:
             settings['enable-scheduler'] = self.get_scheduler_enabled()
             settings['schedule-time'] = self.get_schedule_time()
         except Exception as e:
-            print(f"Error getting all settings: {e}")
+            print(f"Error getting all settings: {e}", file=sys.stderr)
 
         return settings
 
@@ -235,22 +235,20 @@ class BackupConfig:
         """
         success = True
 
-        # Set default backup location if not set
-        if not self.get_backup_location():
-            if not self.set_backup_location('/mnt/backups'):
-                print("Warning: Could not set default backup location")
-                success = False
+        # No default backup location: an empty one is "no drive chosen yet",
+        # and Backups asks for one; a made-up /mnt/backups read as a drive
+        # that had been chosen and was missing.
 
         # Set default schedule time if not set
         if not self.get_schedule_time():
             if not self.set_schedule_time('02:00'):
-                print("Warning: Could not set default schedule time")
+                print("Warning: Could not set default schedule time", file=sys.stderr)
                 success = False
 
         # Ensure scheduler is disabled by default
         if self.get_scheduler_enabled() is None:
             if not self.set_scheduler_enabled(False):
-                print("Warning: Could not set default scheduler state")
+                print("Warning: Could not set default scheduler state", file=sys.stderr)
                 success = False
 
         return success

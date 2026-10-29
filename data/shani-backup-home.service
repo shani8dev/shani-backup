@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily snapshots of home folders (/home/.snapshots)
+ConditionPathIsDirectory=/home
+RequiresMountsFor=/home
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/shani-backup home daily --keep 14
+Nice=10
+IOSchedulingClass=idle
+ProtectSystem=strict
+ReadWritePaths=/home
+PrivateTmp=true

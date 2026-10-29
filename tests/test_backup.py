@@ -272,214 +272,236 @@ def run_gui(code, env):
 
 @pytest.mark.skipif(not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")),
                     reason="needs a display (CI runs under xvfb-run)")
-def test_the_header_indicator_is_not_the_cards_indicator(gui_env):
-    """`status_indicator` was assigned twice, so the header's dot was dead.
-
-    The header built its own indicator, then the Backup tab's progress card
-    assigned a second one to the same name - so every "update the indicator" call
-    updated the card's dot and the header's said "Ready" for ever, through a
-    running backup and through a failure.
-    """
+def test_window_has_the_two_pages_and_opens_on_the_one_asked(gui_env, tmp_path):
+    """Your Files and Backups, nothing else; `shani-backup open backups` opens there.
+    No backup drive set, so Backups shows its start page, not an empty form."""
     code = """
 import gi; gi.require_version('Gtk','4.0'); gi.require_version('Adw','1')
 from gi.repository import Gtk, GLib
-from shani_backup.ui.main_window import ShaniBackupWindow, ShaniBackupApp
-import shani_backup.ui.main_window as mw
-
-def activate(a):
-    w = ShaniBackupWindow()
-    print('distinct', w.header_status_indicator is not w.status_indicator)
-    print('before', w.header_status_label.get_text())
-    w._set_header_status('Running', 'status-running')
-    print('after', w.header_status_label.get_text())
-    print('card_untouched', w.status_indicator.get_style_context().has_class('status-running'))
-    a.quit()
-
-app = Gtk.Application(application_id='test.shani.backup')
-app.connect('activate', activate)
-app.run([])
-"""
-    r = run_gui(code, gui_env)
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert "distinct True" in r.stdout
-    assert "before ● Ready" in r.stdout
-    # The whole point: the header indicator must be able to leave "Ready".
-    assert "after ● Running" in r.stdout
-
-
-@pytest.mark.skipif(not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")),
-                    reason="needs a display (CI runs under xvfb-run)")
-def test_a_failing_backup_moves_the_header_indicator(gui_env):
-    """End to end through the callback, not through the helper directly.
-
-    Driving `_set_header_status` proves the helper works; driving the completed
-    and failed callbacks is what proves the *app* calls it.
-    """
-    code = """
-import gi; gi.require_version('Gtk','4.0'); gi.require_version('Adw','1')
-from gi.repository import Gtk
-from shani_backup.ui.main_window import ShaniBackupWindow
-from shani_backup.ui.main_window import BackupJob, BackupStatus
-
-def activate(a):
-    w = ShaniBackupWindow()
-    job = BackupJob('j1', '/src', '/dst', 'backup')
-    w._update_backup_ui_failed(job)
-    print('failed:', w.header_status_label.get_text())
-    w._update_backup_ui_completed(job)
-    print('completed:', w.header_status_label.get_text())
-    a.quit()
-
-app = Gtk.Application(application_id='test.shani.backup')
-app.connect('activate', activate)
-app.run([])
-"""
-    r = run_gui(code, gui_env)
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert "failed: ● Failed" in r.stdout
-    assert "completed: ● Completed" in r.stdout
-
-
-@pytest.mark.skipif(not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")),
-                    reason="needs a display (CI runs under xvfb-run)")
-def test_the_restore_tab_is_populated_on_arrival(gui_env):
-    """It opened with an empty combo and a greyed button until Refresh was pressed.
-
-    Set up by writing the configured location into GSettings *before* the window
-    is built, which is what an installed machine looks like.
-    """
-    code = """
-import gi; gi.require_version('Gio','2.0')
-from gi.repository import Gio
-Gio.Settings.new('org.shani.backup').set_string('backup-location', '/mnt/backups')
-import gi as _gi; _gi.require_version('Gtk','4.0'); _gi.require_version('Adw','1')
-from gi.repository import Gtk
 from shani_backup.ui.main_window import ShaniBackupWindow
 
 def activate(a):
-    w = ShaniBackupWindow()
-    # ListStore has no get_n_items(); GListModel's iter_children is the
-    # interface that does, and it is what the assertion below needs.
-    print('repo_count', w.repo_combo.get_model().iter_n_children(None))
-    print('active', w.repo_combo.get_active_text())
-    print('button_sensitive', w.restore_button.get_sensitive())
-    a.quit()
+    w = ShaniBackupWindow(page='backups', application=a)
+    w.present()
+    pages = []
+    m = w.view_stack.get_pages()
+    for i in range(m.get_n_items()):
+        pages.append(m.get_item(i).get_name())
+    print('pages', ','.join(pages))
+    print('open', w.view_stack.get_visible_child_name())
+    def later():
+        print('backups_state', w.backups_page.stack.get_visible_child_name())
+        a.quit()
+    GLib.timeout_add(1500, later)
 
 app = Gtk.Application(application_id='test.shani.backup')
 app.connect('activate', activate)
 app.run([])
 """
-    r = run_gui(code, gui_env)
+    env = {**gui_env, "SHANI_BACKUP_HOME": str(tmp_path)}
+    r = run_gui(code, env)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "repo_count 1" in r.stdout
-    assert "active /mnt/backups" in r.stdout
-    # A configured repository means the button works without pressing Refresh.
-    assert "button_sensitive True" in r.stdout
+    assert "pages home,backups" in r.stdout
+    assert "open backups" in r.stdout
+    # no drive chosen (the schema default is empty): the start page
+    assert "backups_state start" in r.stdout
 
 
-@pytest.mark.skipif(not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")),
-                    reason="needs a display (CI runs under xvfb-run)")
-def test_the_restore_checkboxes_are_gone(gui_env):
-    """Two options nothing read are worse than no options on a restore path."""
-    code = """
-import gi; gi.require_version('Gtk','4.0'); gi.require_version('Adw','1')
-from gi.repository import Gtk
-from shani_backup.ui.main_window import ShaniBackupWindow
-
-def activate(a):
-    w = ShaniBackupWindow()
-    print('has_overwrite', hasattr(w, 'overwrite_check'))
-    print('has_preserve', hasattr(w, 'preserve_attr_check'))
-    a.quit()
-
-app = Gtk.Application(application_id='test.shani.backup')
-app.connect('activate', activate)
-app.run([])
-"""
-    r = run_gui(code, gui_env)
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert "has_overwrite False" in r.stdout
-    assert "has_preserve False" in r.stdout
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    """A real restic repository with the password in the environment (the
+    keyring path is what a person uses; restic.py leaves a set RESTIC_PASSWORD alone)."""
+    if not shutil.which("restic"):
+        pytest.skip("restic is not installed")
+    sys.path.insert(0, str(REPO / "src"))
+    monkeypatch.setenv("RESTIC_PASSWORD", "correct horse")
+    monkeypatch.setenv("RESTIC_CACHE_DIR", str(tmp_path / "cache"))
+    r = tmp_path / "drive" / "backups"
+    subprocess.run(["restic", "init", "--repo", str(r)], check=True, capture_output=True)
+    return r
 
 
-@pytest.mark.skipif(not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")),
-                    reason="needs a display (CI runs under xvfb-run)")
-def test_delete_refuses_the_path_being_listed_and_asks_before_destroying(gui_env):
-    """The safety rules, without needing a btrfs filesystem.
+def test_restic_back_up_list_restore(repo, tmp_path, monkeypatch):
+    from shani_backup import restic
+    home = tmp_path / "home"
+    (home / "Documents").mkdir(parents=True)
+    (home / "Documents" / "thesis.md").write_text("chapter one")
+    (home / ".cache").mkdir()
+    (home / ".cache" / "junk").write_text("x" * 1000)
+    (home / "Videos").mkdir()
+    (home / "Videos" / ".nobackup").touch()
+    (home / "Videos" / "big.mkv").write_text("y")
+    monkeypatch.setenv("HOME", str(home))
 
-    Two rules, and neither is exercised by a real delete in a unit test:
-    the path the list is showing is never deletable from its own list, and a
-    real delete goes through a confirmation that names the path.
-    """
-    code = """
-import gi; gi.require_version('Gtk','4.0'); gi.require_version('Adw','1')
-from gi.repository import Gtk
-from shani_backup.ui.main_window import ShaniBackupWindow
-import shani_backup.ui.main_window as mw
+    assert restic.place(str(repo)) == restic.Place(str(repo), True, True)
+    seen = []
+    r = restic.backup(str(repo), lambda f, c: seen.append(f))
+    assert r.ok and len(r.detail) == 8, r.detail
+    ok, snaps, why = restic.snapshots(str(repo))
+    assert ok and len(snaps) == 1 and snaps[0].id == r.detail, why
 
-calls = []
-def fake_delete(path):
-    calls.append(path)
-    return type('R', (), {'ok': True, 'detail': ''})()
-mw.delete_snapshot_detailed = fake_delete
+    out = tmp_path / "out"
+    r = restic.restore(str(repo), snaps[0].id, str(out))
+    assert r.ok, r.detail
+    got = {os.path.relpath(os.path.join(d, f), out) for d, _, fs in os.walk(out) for f in fs}
+    rel = os.path.relpath(home, "/")
+    assert os.path.join(rel, "Documents/thesis.md") in got
+    # caches and a .nobackup folder are left out
+    assert not any(".cache" in g or "big.mkv" in g for g in got), got
 
-def activate(a):
-    w = ShaniBackupWindow()
-    # 1. the path being pointed at is never deletable
-    w.snapshot_path_entry.set_text('/')
-    w._selected_snapshot = '/'
-    w._delete_snapshot(None)
-    print('self_delete_refused', w.status_label.get_text().startswith('Refusing'))
-    print('no_delete_ran', calls == [])
-
-    # 2. a real target goes through the confirmation
-    w.snapshot_path_entry.set_text('/')
-    w._selected_snapshot = '/snapshots/keep-me'
-    w._confirm_delete = lambda target: False
-    w._delete_snapshot(None)
-    print('declined', w.status_label.get_text() == 'Delete cancelled')
-    print('still_nothing_ran', calls == [])
-
-    # 3. confirmed -> the delete actually runs
-    w._confirm_delete = lambda target: target == '/snapshots/keep-me'
-    w._delete_snapshot(None)
-    print('ran_on_confirm', calls == ['/snapshots/keep-me'])
-    a.quit()
-
-app = Gtk.Application(application_id='test.shani.backup')
-app.connect('activate', activate)
-app.run([])
-"""
-    r = run_gui(code, gui_env)
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert "self_delete_refused True" in r.stdout
-    assert "no_delete_ran True" in r.stdout
-    assert "declined True" in r.stdout
-    assert "still_nothing_ran True" in r.stdout
-    assert "ran_on_confirm True" in r.stdout
+    # never into a folder that has things in it
+    r = restic.restore(str(repo), snaps[0].id, str(out))
+    assert not r.ok and "not empty" in r.detail
 
 
-@pytest.mark.skipif(not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")),
-                    reason="needs a display (CI runs under xvfb-run)")
-def test_the_version_shown_is_the_package_version(gui_env):
-    """The status bar and the About box hardcoded v0.0.1 while __version__ moved."""
-    code = """
-import gi; gi.require_version('Gtk','4.0'); gi.require_version('Adw','1')
-from gi.repository import Gtk
-from shani_backup.ui.main_window import ShaniBackupWindow
-from shani_backup import __version__
+def test_restic_wrong_password_says_so(repo, monkeypatch):
+    from shani_backup import restic
+    monkeypatch.setenv("RESTIC_PASSWORD", "wrong")
+    ok, _, why = restic.snapshots(str(repo))
+    assert not ok and why == "The password does not open this backup"
 
-def activate(a):
-    w = ShaniBackupWindow()
-    print('version', w.version_label.get_text())
-    print('package', __version__)
-    a.quit()
 
-app = Gtk.Application(application_id='test.shani.backup')
-app.connect('activate', activate)
-app.run([])
-"""
-    r = run_gui(code, gui_env)
-    assert r.returncode == 0, r.stdout + r.stderr
-    shown = r.stdout.split("version ")[1].splitlines()[0]
-    assert shown == f"v{r.stdout.split('package ')[1].splitlines()[0]}"
+def test_backup_to_a_missing_drive_says_so(tmp_path):
+    sys.path.insert(0, str(REPO / "src"))
+    from shani_backup import restic
+    if not shutil.which("restic"):
+        pytest.skip("restic is not installed")
+    r = restic.backup(str(tmp_path / "unplugged"))
+    assert not r.ok and "plugged in" in r.detail
+
+
+def test_schedule_time_is_checked_and_kept(tmp_path, monkeypatch):
+    sys.path.insert(0, str(REPO / "src"))
+    from shani_backup import restic
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    for bad in ("25:00", "7pm", "12:60", "1230"):
+        assert not restic.set_schedule(True, bad).ok
+    assert restic.schedule_time() == "12:30"          # the timer's default
+    restic.set_schedule(True, "21:15")                # systemctl --user may be absent here
+    assert restic.schedule_time() == "21:15"
+    conf = (tmp_path / "systemd/user/shani-backup-restic.timer.d/time.conf").read_text()
+    assert "OnCalendar=\nOnCalendar=*-*-* 21:15:00" in conf
+
+
+# ---- home snapshots (home.py) without a filesystem: the refusals ---------------------
+# The behaviour on btrfs - coverage, read-only, privacy between accounts,
+# retention, a planted symlink - is measured in a real slot by shani-testbed's
+# slot-tests/home-snapshots.sh, on the real /home layout.
+
+def test_home_snapshot_needs_root(monkeypatch):
+    sys.path.insert(0, str(REPO / "src"))
+    from shani_backup import home
+    monkeypatch.setattr(home.os, "geteuid", lambda: 1000)
+    for r in (home.snapshot_person("root"), home.snapshot_whole()):
+        assert not r.ok and "root" in r.detail
+
+
+def test_home_remove_refuses_paths(tmp_path, monkeypatch):
+    sys.path.insert(0, str(REPO / "src"))
+    from shani_backup import home
+    monkeypatch.setattr(home, "HOME", str(tmp_path))
+    for name in ("../../etc", "a/b", "..", ""):
+        r = home.remove("alice", name)
+        assert not r.ok, name
+
+
+def test_home_low_space_keeps_fewer(tmp_path, monkeypatch):
+    sys.path.insert(0, str(REPO / "src"))
+    from shani_backup import home
+    removed = []
+    monkeypatch.setattr(home, "HOME", str(tmp_path))
+    monkeypatch.setattr(home, "people", lambda: [])
+    monkeypatch.setattr(home, "_delete", lambda p: removed.append(os.path.basename(p)) or home.Result(True, p))
+    whole = tmp_path / ".snapshots" / "@home"
+    for d in range(1, 8):
+        (whole / f"daily-2026-10-0{d}").mkdir(parents=True)
+    (whole / "manual-2026-10-01_09-00-00").mkdir()
+    monkeypatch.setattr(home, "low_on_space", lambda: False)
+    home.daily(keep=5)
+    assert removed == ["daily-2026-10-01", "daily-2026-10-02"]
+    removed.clear()
+    monkeypatch.setattr(home, "low_on_space", lambda: True)
+    home.daily(keep=5)
+    # the oldest five of seven go; the manual one stays (_delete is stubbed, so
+    # the folders are still there for the second count)
+    assert removed == [f"daily-2026-10-0{d}" for d in range(1, 6)]
+
+
+def test_home_list_as_a_person_is_json():
+    r = cli("home", "list", "--json")
+    d = json.loads(r.stdout)
+    assert r.returncode == 0 and d["ok"] and isinstance(d["snapshots"], list)
+    r = cli("home", "list", "root", "--json") if os.geteuid() != 0 else None
+    if r is not None:
+        d = json.loads(r.stdout)
+        assert r.returncode == 1 and not d["ok"] and "root" in d["error"]
+
+
+def test_restore_never_overwrites(tmp_path):
+    """A restored copy takes its old place only when that is free; otherwise it
+    lands beside the current file, dated - and a second restore does not
+    replace the first."""
+    sys.path.insert(0, str(REPO / "src"))
+    pytest.importorskip("gi")
+    from shani_backup.ui.home_page import restore
+    import datetime as dt
+    when = dt.datetime(2026, 10, 29, 2, 0)
+    snap = tmp_path / "snap" / "Documents"
+    snap.mkdir(parents=True)
+    (snap / "report.odt").write_text("old")
+    (snap / "album").mkdir()
+    (snap / "album" / "a.jpg").write_text("pic")
+    home_docs = tmp_path / "home" / "Documents"
+
+    # gone from home: back in its place (folders made as needed)
+    p = restore(str(snap / "report.odt"), str(home_docs / "report.odt"), when)
+    assert p == str(home_docs / "report.odt") and open(p).read() == "old"
+
+    # there now, and changed: beside it, dated; the current one untouched
+    (home_docs / "report.odt").write_text("new")
+    p2 = restore(str(snap / "report.odt"), str(home_docs / "report.odt"), when)
+    p3 = restore(str(snap / "report.odt"), str(home_docs / "report.odt"), when)
+    assert os.path.basename(p2) == "report (29 Oct).odt"
+    assert os.path.basename(p3) == "report (29 Oct, 2).odt"
+    assert (home_docs / "report.odt").read_text() == "new"
+
+    # a folder, beside the current one, contents and all
+    (home_docs / "album").mkdir()
+    p4 = restore(str(snap / "album"), str(home_docs / "album"), when)
+    assert os.path.basename(p4) == "album (29 Oct)" and open(os.path.join(p4, "a.jpg")).read() == "pic"
+
+
+def test_set_up_keeps_the_password_in_the_keyring(tmp_path, monkeypatch):
+    """The person's path: set_up() with a password, then a backup with no
+    password anywhere in the environment - restic gets it from the keyring."""
+    if not (shutil.which("restic") and shutil.which("secret-tool") and os.environ.get("DBUS_SESSION_BUS_ADDRESS")):
+        pytest.skip("needs restic, secret-tool and a Secret Service on the session bus")
+    probe = subprocess.run(["secret-tool", "store", "--label", "probe", "app", "shani-backup-probe"],
+                           input="x", capture_output=True, text=True, timeout=10)
+    if probe.returncode != 0:
+        pytest.skip(f"no usable Secret Service: {probe.stderr.strip()[:100]}")
+    subprocess.run(["secret-tool", "clear", "app", "shani-backup-probe"], capture_output=True)
+    sys.path.insert(0, str(REPO / "src"))
+    from shani_backup import restic
+    for k in ("RESTIC_PASSWORD", "RESTIC_PASSWORD_FILE", "RESTIC_PASSWORD_COMMAND"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("RESTIC_CACHE_DIR", str(tmp_path / "cache"))
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "a.txt").write_text("a")
+    monkeypatch.setenv("HOME", str(home))
+    repo = str(tmp_path / "drive")
+    try:
+        assert restic.set_up(repo, "").ok is False                    # no password, no backup
+        r = restic.set_up(repo, "tr0ub4dor")
+        assert r.ok and r.detail == "created", r.detail
+        assert restic.backup(repo).ok
+        # the same drive again, as on a new computer: a wrong password is refused,
+        # the right one opens it
+        assert restic.set_up(repo, "nope").ok is False
+        r = restic.set_up(repo, "tr0ub4dor")
+        assert r.ok and r.detail == "opened", r.detail
+        ok, snaps, why = restic.snapshots(repo)
+        assert ok and len(snaps) == 1, why
+    finally:
+        subprocess.run(["secret-tool", "clear", "app", "shani-backup", "repository", repo], capture_output=True)

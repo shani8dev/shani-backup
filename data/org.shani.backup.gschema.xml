@@ -2,7 +2,7 @@
 <schemalist>
   <schema id="org.shani.backup" path="/org/shani/backup/">
     <key name="backup-location" type="s">
-      <default>'/mnt/backups'</default>
+      <default>''</default>
       <summary>Backup location</summary>
       <description>Default location for storing backups</description>
     </key>

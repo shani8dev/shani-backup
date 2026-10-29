@@ -10,6 +10,8 @@ import sys
 import os
 from . import __version__
 from . import btrfs
+from . import home
+from . import restic
 from .config import get_config, apply_config_defaults
 
 
@@ -33,6 +35,52 @@ def _json_out(payload, ok: bool) -> int:
     return 0 if ok else 1
 
 
+def _me() -> str:
+    """The person asking - the one who ran pkexec/sudo, not root."""
+    import pwd
+    uid = os.environ.get("PKEXEC_UID") or os.environ.get("SUDO_UID")
+    return pwd.getpwuid(int(uid) if uid else os.getuid()).pw_name
+
+
+def _home(args, home_parser) -> int:
+    """`shani-backup home …` - see home.py."""
+    as_json = getattr(args, "json", False)
+    cmd = args.home_command
+    if cmd is None:
+        home_parser.print_help()
+        return 1
+    user = getattr(args, "user", None) or _me()
+    if user != _me() and os.geteuid() != 0:
+        msg = "only root may act on somebody else's snapshots"
+        return _json_out({"ok": False, "error": msg}, False) if as_json else (print(f"Error: {msg}", file=sys.stderr) or 1)
+
+    if cmd == "list":
+        snaps = home.list_for(user)
+        if as_json:
+            return _json_out({"ok": True, "user": user, "snapshots": [s._asdict() for s in snaps]}, True)
+        if not snaps:
+            print(f"No snapshots of {user}'s home yet.")
+        for s in snaps:
+            print(f"{s.name:28} {s.path}")
+        return 0
+
+    if cmd == "daily":
+        results = home.daily(keep=args.keep)
+        ok = all(r.ok for _, r in results)
+        if as_json:
+            return _json_out({"ok": ok, "results": [{"who": w, "ok": r.ok, "detail": r.detail} for w, r in results],
+                              **({} if ok else {"error": next(r.detail for _, r in results if not r.ok)})}, ok)
+        for who, r in results:
+            print(f"{who}: {'ok' if r.ok else 'FAILED'} {r.detail}")
+        return 0 if ok else 1
+
+    result = home.snapshot_person(user, "manual") if cmd == "snapshot" else home.remove(user, args.name)
+    if as_json:
+        return _json_out({"ok": result.ok, **({"path": result.detail} if result.ok else {"error": result.detail})}, result.ok)
+    print(result.detail if result.ok else f"Error: {result.detail}", file=sys.stdout if result.ok else sys.stderr)
+    return 0 if result.ok else 1
+
+
 def main():
     parser = argparse.ArgumentParser(description="Shani Backup utility")
     parser.add_argument(
@@ -40,13 +88,17 @@ def main():
     )
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
-    # Backup command
-    backup_parser = subparsers.add_parser("backup", help="Create a backup")
+    # Backup command (restic.py): the home folder to the backup drive
+    backup_parser = subparsers.add_parser("backup", help="Back up your home folder to the backup drive (restic)")
     backup_parser.add_argument(
-        "source", help="Source directory to backup"
+        "source", nargs="?", help="What to back up (default: your home folder)"
     )
     backup_parser.add_argument(
-        "--destination", help="Destination for the backup"
+        "--destination", help="The backup drive or folder (default: the one set in Backups)"
+    )
+    backup_parser.add_argument(
+        "--scheduled", action="store_true",
+        help="As the timer runs it: also thin out old backups (7 daily, 4 weekly, 12 monthly)"
     )
     backup_parser.add_argument(
         "--json", action="store_true",
@@ -54,17 +106,30 @@ def main():
     )
 
     # Restore command
-    restore_parser = subparsers.add_parser("restore", help="Restore from a backup")
+    restore_parser = subparsers.add_parser("restore", help="Restore a backup into a new folder")
     restore_parser.add_argument(
-        "backup", help="Backup to restore from"
+        "target", help="An empty or new folder to restore into"
     )
     restore_parser.add_argument(
-        "target", help="Target directory to restore to"
+        "--snapshot", default="latest", help="Which backup (an id from `backups list`; default: latest)"
+    )
+    restore_parser.add_argument(
+        "--from", dest="repository", help="The backup drive or folder (default: the one set in Backups)"
     )
     restore_parser.add_argument(
         "--json", action="store_true",
         help="Machine-readable output: one JSON object on stdout"
     )
+
+    # What is on the backup drive, and the schedule
+    backups_parser = subparsers.add_parser("backups", help="The backups on the backup drive")
+    backups_parser.add_argument("action", nargs="?", choices=["list"], default="list")
+    backups_parser.add_argument("--json", action="store_true",
+                                help="Machine-readable output: one JSON object on stdout")
+
+    # Open the app on a page (Cassini's "Open Your Files")
+    open_parser = subparsers.add_parser("open", help="Open the app")
+    open_parser.add_argument("page", nargs="?", choices=["home", "backups"], default="home")
 
     # Snapshot command
     snapshot_parser = subparsers.add_parser("snapshot", help="Manage Btrfs snapshots")
@@ -98,110 +163,83 @@ def main():
         help="Machine-readable output: one JSON object on stdout"
     )
 
+    # Home snapshots (home.py): per person, on the same disk
+    home_parser = subparsers.add_parser(
+        "home", help="Snapshots of home folders under /home/.snapshots")
+    home_sub = home_parser.add_subparsers(dest="home_command", help="Home snapshot commands")
+    h = home_sub.add_parser("snapshot", help="Take a snapshot of a home now (root)")
+    h.add_argument("user", nargs="?", help="Whose home; yours when left out")
+    h = home_sub.add_parser("list", help="List the snapshots holding a home")
+    h.add_argument("user", nargs="?", help="Whose home (root only); yours when left out")
+    h = home_sub.add_parser("daily", help="Today's snapshot of every home, and old ones removed (root; the timer runs this)")
+    h.add_argument("--keep", type=int, default=14, help="Daily snapshots kept per home (default 14; 0 keeps all)")
+    h = home_sub.add_parser("remove", help="Remove one of your own snapshots (root)")
+    h.add_argument("name", help="The snapshot's name, as `home list` shows it")
+    h.add_argument("--user", help="Whose snapshot; yours when left out")
+    for h in home_sub.choices.values():
+        h.add_argument("--json", action="store_true",
+                       help="Machine-readable output: one JSON object on stdout")
+
     # Schedule command
     schedule_parser = subparsers.add_parser("schedule", help="Manage backup schedule")
     schedule_parser.add_argument(
-        "--enable", action="store_true", help="Enable the scheduler"
+        "--enable", action="store_true", help="Back up every day (a systemd user timer)"
     )
     schedule_parser.add_argument(
-        "--disable", action="store_true", help="Disable the scheduler"
+        "--disable", action="store_true", help="Stop the daily backup"
+    )
+    schedule_parser.add_argument(
+        "--at", metavar="HH:MM", help="The time of day for the daily backup"
     )
 
     args = parser.parse_args()
 
     if args.command == "backup":
-        # Initialize config
-        config = get_config()
-        apply_config_defaults()
-        
-        # Get backup location from config or use provided destination
-        backup_location = args.destination if args.destination else config.get_backup_location()
-        
-        if not backup_location:
-            print("Error: No backup location specified. Provide --destination or configure backup-location in settings.")
-            sys.exit(1)
-        
-        # Check if source exists
-        if not os.path.exists(args.source):
-            print(f"Error: Source directory '{args.source}' does not exist")
-            sys.exit(1)
-        
-        # Use restic to backup the source directory
-        cmd = ["restic", "backup", args.source, "--repo", backup_location]
-        try:
-            if not args.json:
-                print(f"Starting backup of {args.source} to {backup_location}...")
-            # restic's own stderr is captured so a failure can report *why*: the
-            # old code printed "Command '[...]' returned non-zero exit status 1",
-            # which is the shell's phrasing, not a reason (a missing repository,
-            # a wrong password and an unreachable disk all read the same).
-            proc = subprocess.run(cmd, capture_output=True, text=True)
-            if proc.returncode == 0:
-                if args.json:
-                    sys.exit(_json_out({"ok": True, "source": args.source,
-                                        "repository": backup_location}, True))
-                print(f"Backup of {args.source} completed successfully.")
-                print(f"Repository: {backup_location}")
-                return
-            reason = (proc.stderr or proc.stdout or "").strip().splitlines()
-            detail = reason[-1].strip() if reason else f"restic exited {proc.returncode}"
-            if args.json:
-                sys.exit(_json_out({"ok": False, "source": args.source,
-                                    "repository": backup_location, "error": detail},
-                                   False))
-            print(f"Backup failed: {detail}")
-            sys.exit(1)
-        except FileNotFoundError:
-            if args.json:
-                sys.exit(_json_out({"ok": False, "error": "restic is not installed"},
-                                   False))
-            print("Error: restic command not found. Please install restic.")
-            sys.exit(1)
+        repo = args.destination or get_config().get_backup_location() or ""
+        if not repo:
+            msg = "No backup drive is set - choose one in Backups, or pass --destination"
+            sys.exit(_json_out({"ok": False, "error": msg}, False) if args.json else (print(f"Error: {msg}") or 1))
+        last = [-1]
+
+        def progress(frac, current):
+            pct = int(frac * 100)
+            if not args.json and pct != last[0]:
+                last[0] = pct
+                print(f"\r{pct:3d}%  {current[-60:]:60}", end="", flush=True)
+        result = restic.backup(repo, progress, args.source)
+        if result.ok and args.scheduled:
+            restic.thin(repo)
+        if args.json:
+            sys.exit(_json_out({"ok": result.ok, **({"snapshot": result.detail} if result.ok else {"error": result.detail})},
+                               result.ok))
+        print()
+        print(f"Backed up: {result.detail}" if result.ok else f"Error: {result.detail}")
+        sys.exit(0 if result.ok else 1)
     elif args.command == "restore":
-        # Initialize config
-        config = get_config()
-        apply_config_defaults()
-        
-        # Get repository from config or use provided backup
-        repository = args.backup if args.backup else config.get_backup_location()
-        
-        if not repository:
-            print("Error: No backup repository specified. Provide backup argument or configure backup-location in settings.")
-            sys.exit(1)
-        
-        # Check if target directory exists
-        if not os.path.exists(args.target):
-            print(f"Error: Target directory '{args.target}' does not exist")
-            sys.exit(1)
-        
-        # Use restic to restore
-        # In a real implementation, we would let the user choose which snapshot to restore
-        cmd = ["restic", "restore", "latest", "--target", args.target, "--repo", repository]
-        try:
-            if not args.json:
-                print(f"Starting restore from {repository} to {args.target}...")
-            proc = subprocess.run(cmd, capture_output=True, text=True)
-            if proc.returncode == 0:
-                if args.json:
-                    sys.exit(_json_out({"ok": True, "repository": repository,
-                                        "target": args.target, "snapshot": "latest"},
-                                       True))
-                print(f"Restored latest snapshot to {args.target}.")
-                print(f"Repository: {repository}")
-                return
-            reason = (proc.stderr or proc.stdout or "").strip().splitlines()
-            detail = reason[-1].strip() if reason else f"restic exited {proc.returncode}"
-            if args.json:
-                sys.exit(_json_out({"ok": False, "repository": repository,
-                                    "target": args.target, "error": detail}, False))
-            print(f"Restore failed: {detail}")
-            sys.exit(1)
-        except FileNotFoundError:
-            if args.json:
-                sys.exit(_json_out({"ok": False, "error": "restic is not installed"},
-                                   False))
-            print("Error: restic command not found. Please install restic.")
-            sys.exit(1)
+        repo = args.repository or get_config().get_backup_location() or ""
+        result = restic.restore(repo, args.snapshot, args.target) if repo else \
+            restic.Result(False, "No backup drive is set - choose one in Backups, or pass --from")
+        if args.json:
+            sys.exit(_json_out({"ok": result.ok, **({"target": result.detail} if result.ok else {"error": result.detail})},
+                               result.ok))
+        print(f"Restored into {result.detail}" if result.ok else f"Error: {result.detail}")
+        sys.exit(0 if result.ok else 1)
+    elif args.command == "backups":
+        repo = get_config().get_backup_location() or ""
+        p = restic.place(repo)
+        ok, snaps, why = restic.snapshots(repo) if p.is_repo else (True, [], "")
+        payload = {"ok": ok, "repository": repo, "reachable": p.reachable, "set_up": p.is_repo,
+                   "schedule": {"on": restic.schedule_on(), "time": restic.schedule_time()},
+                   "backups": [s._asdict() for s in snaps], **({} if ok else {"error": why})}
+        if args.json:
+            sys.exit(_json_out(payload, ok))
+        print(f"Backup drive: {repo or '(none)'}" + ("" if p.reachable or not repo else " - not connected"))
+        for s in snaps:
+            print(f"  {s.id}  {s.time[:16].replace('T', ' ')}")
+        sys.exit(0 if ok else 1)
+    elif args.command == "open":
+        from .ui.main_window import main as gui_main
+        sys.exit(gui_main(page=args.page))
     elif args.command == "snapshot":
         if args.snapshot_command == "create":
             # The detailed form, because the plain bool throws away the reason and
@@ -273,46 +311,19 @@ def main():
         else:
             snapshot_parser.print_help()
             sys.exit(1)
+    elif args.command == "home":
+        sys.exit(_home(args, home_parser))
     elif args.command == "schedule":
-        config = get_config()
-        if args.enable:
-            print("Enabling scheduler")
-            success = config.set_scheduler_enabled(True)
-            if success:
-                print("Scheduler enabled successfully")
-            else:
-                print("Failed to enable scheduler")
-                sys.exit(1)
-        elif args.disable:
-            print("Disabling scheduler")
-            success = config.set_scheduler_enabled(False)
-            if success:
-                print("Scheduler disabled successfully")
-            else:
-                print("Failed to disable scheduler")
-                sys.exit(1)
-        else:
-            # Show current scheduler status
-            enabled = config.get_scheduler_enabled()
-            if enabled is None:
-                print("Scheduler status: GSettings not available")
-            elif enabled:
-                print("Scheduler status: ENABLED")
-            else:
-                print("Scheduler status: DISABLED")
-            schedule_time = config.get_schedule_time()
-            if schedule_time:
-                print(f"Schedule time: {schedule_time}")
-            backup_location = config.get_backup_location()
-            if backup_location:
-                print(f"Backup location: {backup_location}")
-            
-            # Validate configuration
-            errors = config.validate_configuration()
-            if errors:
-                print("Configuration issues:")
-                for error in errors:
-                    print(f"  - {error}")
+        # the daily backup is a systemd user timer (shani-backup-restic.timer);
+        # the enable-scheduler key it used to flip was read by nothing
+        if args.enable or args.disable or args.at:
+            on = not args.disable and (args.enable or restic.schedule_on())
+            result = restic.set_schedule(on, args.at)
+            print(("Daily backup " + (f"on, at {restic.schedule_time()}" if on else "off"))
+                  if result.ok else f"Error: {result.detail}")
+            sys.exit(0 if result.ok else 1)
+        print(f"Daily backup: {'on' if restic.schedule_on() else 'off'}, at {restic.schedule_time()}")
+        print(f"Backup drive: {get_config().get_backup_location() or '(none chosen)'}")
     elif os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY"):
         # no subcommand on a desktop: open the app. The .desktop entry runs
         # plain `shani-backup`, which used to print this help and exit, so

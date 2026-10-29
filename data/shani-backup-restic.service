@@ -1,0 +1,8 @@
+[Unit]
+Description=Back up your home folder (shani-backup, restic)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/shani-backup backup --scheduled
+Nice=10
+IOSchedulingClass=idle

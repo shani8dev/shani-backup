@@ -12,6 +12,14 @@ run the CLI or launch the GTK4 window. The repo uses conventional commits
 
 - **btrfs snapshot lifecycle** — create, list, and delete snapshots of any
   subvolume (read-only or writable), backed by `btrfs.py`.
+- **Daily home snapshots** — `home.py` and `shani-backup-home.timer`: once a
+  day, a read-only snapshot covering every home, kept in `/home/.snapshots`
+  (14 days, fewer when the disk is nearly full). On ShaniOS a home is a plain
+  folder inside the `@home` subvolume, so those are covered by one snapshot of
+  `/home` in which each home keeps its own owner and mode; a home that is its
+  own subvolume (`useradd --btrfs-subvolume-home`) gets its own, in a folder
+  only its owner can open. Same disk: an undo for deleted files, not a
+  backup. The idea is NAZY-OS/btrfs-home-user-snapshots'; the code is new.
 - **Directory backup & restore** — `restic`-backed backup of source
   directories to a repository, with restore of the latest snapshot.
 - **Scheduled backups** — enable/disable a daily backup scheduler through
@@ -62,6 +70,12 @@ shani-backup snapshot list /
 
 # Delete a snapshot
 shani-backup snapshot delete /mnt/snapshots/root@2026-09-20
+
+# Home snapshots (see home.py)
+shani-backup home list                 # yours, newest first (--json for Cassini)
+sudo shani-backup home snapshot        # one now
+sudo shani-backup home daily --keep 14 # what the timer runs
+sudo shani-backup home remove manual-2026-10-29_14-05-09
 
 # Directory backup via restic
 shani-backup backup /home/user --destination /mnt/backups/repo
