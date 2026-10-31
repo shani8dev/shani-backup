@@ -39,6 +39,11 @@ def _when(name: str):
     return None
 
 
+def _kind(name: str) -> str:
+    """daily | manual | predeploy - the part before the first '-'."""
+    return name.split("-", 1)[0]
+
+
 def _day(d: dt.date, today: dt.date) -> str:
     if d == today:
         return "Today"
@@ -220,13 +225,20 @@ class HomeSnapshotsPage(Gtk.Box):
         return False
 
     def _snapshot_row(self, s, w):
-        manual = s.name.startswith("manual-")
+        kind = _kind(s.name)
+        manual = kind == "manual"
+        predeploy = kind == "predeploy"
         today = dt.date.today()
-        title = (_day(w.date(), today) + (w.strftime(", %H:%M") if manual else "")) if w else s.name
+        title = (_day(w.date(), today) + (w.strftime(", %H:%M") if manual or predeploy else "")) if w else s.name
         if w and (today - w.date()).days >= 7:
             title += w.strftime(" · %A")
-        row = Adw.ActionRow(title=title, subtitle="Taken by hand" if manual else "Daily", activatable=True)
-        row.add_prefix(Gtk.Image(icon_name="camera-photo-symbolic" if manual else "document-open-recent-symbolic"))
+        row = Adw.ActionRow(title=title,
+                            subtitle=("Taken by hand" if manual else
+                                      "Before an update" if predeploy else "Daily"),
+                            activatable=True)
+        row.add_prefix(Gtk.Image(icon_name=("camera-photo-symbolic" if manual else
+                                            "software-update-available-symbolic" if predeploy else
+                                            "document-open-recent-symbolic")))
         browse = Gtk.Button(icon_name="folder-open-symbolic", valign=Gtk.Align.CENTER, tooltip_text="Browse it")
         browse.add_css_class("flat")
         browse.connect("clicked", lambda *_: self._open(s.path))
@@ -351,7 +363,7 @@ class HomeSnapshotsPage(Gtk.Box):
             row.add_prefix(Gtk.Image(gicon=_icon_for(versions[0][1])))
             for s, src, st in versions:
                 w = _when(s.name)
-                when = (_day(w.date(), today) + (w.strftime(", %H:%M") if s.name.startswith("manual-") else "")) if w else s.name
+                when = (_day(w.date(), today) + (w.strftime(", %H:%M") if s.name.startswith(("manual-", "predeploy-")) else "")) if w else s.name
                 v = Adw.ActionRow(title=when, subtitle=_size(st.st_size) if not os.path.isdir(src) else "Folder")
                 show = Gtk.Button(icon_name="folder-open-symbolic", valign=Gtk.Align.CENTER, tooltip_text="Show it")
                 show.add_css_class("flat")

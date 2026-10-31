@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -174,6 +175,43 @@ def test_btrfs_snapshot_create_list_delete(btrfs_mount):
     r = cli("snapshot", "list", str(snaps))
     assert "No snapshots found." in r.stdout
     assert "is not a btrfs subvolume" in r.stdout
+
+
+def test_btrfs_predeploy_snapshot_is_fresh_readonly_and_pruned(btrfs_mount, monkeypatch):
+    """On a real filesystem: a pre-deploy snapshot is a real read-only
+    subvolume, it is not the day's `daily` (the name carries the time), and
+    pruning keeps the newest two without touching daily or manual ones."""
+    sys.path.insert(0, str(REPO / "src"))
+    import datetime as dt
+    from shani_backup import home
+    h = btrfs_mount / "home"
+    subprocess.run(["btrfs", "subvolume", "create", str(h)], check=True, capture_output=True)
+    (h / "alice").mkdir()
+    (h / "alice" / "note").write_text("before the update")
+    monkeypatch.setattr(home, "HOME", str(h))
+    monkeypatch.setattr(home, "people", lambda: [])
+    monkeypatch.setattr(home, "low_on_space", lambda: False)
+
+    base = dt.datetime(2026, 10, 29, 8, 0, 0)
+    snaps = h / ".snapshots" / "@home"
+    for day in range(3):
+        r = home.snapshot_whole("predeploy", base + dt.timedelta(days=day))
+        assert r.ok, r.detail
+        assert (snaps / home._name("predeploy", base + dt.timedelta(days=day)) / "alice" / "note").read_text() \
+            == "before the update"
+    daily = home.snapshot_whole("daily", base)
+    assert daily.ok, daily.detail
+    manual = home.snapshot_whole("manual", base)
+    assert manual.ok, manual.detail
+    ro = subprocess.run(["btrfs", "property", "get", daily.detail], capture_output=True, text=True)
+    assert "ro=true" in ro.stdout
+
+    home.predeploy(keep=2)
+    left = sorted(p.name for p in snaps.iterdir())
+    assert left == ["daily-2026-10-29",
+                    "manual-2026-10-29_08-00-00",
+                    "predeploy-2026-10-30_08-00-00",
+                    "predeploy-2026-10-31_08-00-00"], left
 
 
 def test_btrfs_snapshot_of_missing_source_fails(btrfs_mount):
@@ -425,6 +463,64 @@ def test_home_low_space_keeps_fewer(tmp_path, monkeypatch):
     # the oldest five of seven go; the manual one stays (_delete is stubbed, so
     # the folders are still there for the second count)
     assert removed == [f"daily-2026-10-0{d}" for d in range(1, 6)]
+
+
+def test_home_snapshot_names_carry_the_kind_and_the_time():
+    sys.path.insert(0, str(REPO / "src"))
+    import datetime as dt
+    from shani_backup import home
+    when = dt.datetime(2026, 10, 31, 14, 5, 9)
+    assert home._name("daily", when) == "daily-2026-10-31"
+    assert home._name("manual", when) == "manual-2026-10-31_14-05-09"
+    assert home._name("predeploy", when) == "predeploy-2026-10-31_14-05-09"
+
+
+def test_home_predeploy_is_fresh_beside_a_daily_and_prunes_only_its_own(tmp_path, monkeypatch):
+    """A pre-deploy snapshot must not be answered with today's `daily` (which
+    would hold the morning's files), and its retention must not delete the
+    person's daily or manual snapshots."""
+    sys.path.insert(0, str(REPO / "src"))
+    from shani_backup import home
+    taken, removed = [], []
+    monkeypatch.setattr(home, "HOME", str(tmp_path))
+    monkeypatch.setattr(home, "people", lambda: [types.SimpleNamespace(pw_name="alice")])
+    monkeypatch.setattr(home.btrfs, "is_btrfs_path", lambda p: False)
+    monkeypatch.setattr(home, "low_on_space", lambda: False)
+    monkeypatch.setattr(home, "snapshot_whole",
+                        lambda kind, now=None: taken.append(kind) or home.Result(True, "taken"))
+    monkeypatch.setattr(home, "_delete",
+                        lambda p: removed.append(os.path.basename(p)) or home.Result(True, p))
+    (tmp_path / "alice").mkdir()
+    whole = tmp_path / ".snapshots" / "@home"
+    for name in ("predeploy-2026-10-29_08-00-00", "predeploy-2026-10-30_08-00-00",
+                 "predeploy-2026-10-31_08-00-00", "daily-2026-10-31",
+                 "manual-2026-10-31_09-00-00"):
+        (whole / name).mkdir(parents=True)
+    home.predeploy(keep=2)
+    assert taken == ["predeploy"]
+    assert removed == ["predeploy-2026-10-29_08-00-00"]
+    # 0 keeps all, as `home daily --keep 0` does
+    removed.clear()
+    home.predeploy(keep=0)
+    assert removed == []
+
+
+def test_home_predeploy_is_a_documented_subcommand():
+    r = cli("home", "predeploy", "--help")
+    assert r.returncode == 0, r.stderr
+    assert "--keep" in r.stdout
+
+
+def test_home_predeploy_is_dated_and_labelled_in_the_ui():
+    """Your Files must not present a pre-deploy snapshot as "Daily" with no
+    hour - it would sit beside the day's daily with the same date."""
+    sys.path.insert(0, str(REPO / "src"))
+    import datetime as dt
+    from shani_backup.ui.home_page import _when, _kind
+    assert _when("predeploy-2026-10-31_14-05-09") == dt.datetime(2026, 10, 31, 14, 5, 9)
+    assert _kind("predeploy-2026-10-31_14-05-09") == "predeploy"
+    assert _kind("daily-2026-10-31") == "daily"
+    assert _kind("manual-2026-10-31_14-05-09") == "manual"
 
 
 def test_home_list_as_a_person_is_json():

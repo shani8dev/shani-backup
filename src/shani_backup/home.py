@@ -23,6 +23,16 @@ What is different here, and why:
   beyond 2 while less than 15% of the disk is free - a snapshot keeps what
   was deleted since, so on a full disk deleting files would free nothing.
   Manual ones are only removed by hand.
+* **A pre-deploy snapshot is its own kind.** `shani-deploy` asks for one
+  immediately before it writes to the standby slot (see `predeploy()`), so
+  an update always has a same-minute undo instead of yesterday's `daily`.
+  It cannot reuse `daily` for that: a daily snapshot is idempotent per day,
+  and on a machine updated in the afternoon it would answer "already exists"
+  and hold the morning's files. Two are kept by default; a pre-deploy
+  snapshot is created by root on the system's behalf, not by the person
+  whose files it holds, because btrfs needs root and an unattended update
+  has no session - a snapshot that requires somebody to remember it is a
+  snapshot that is missing when it matters.
 
 Layout:
 
@@ -30,6 +40,7 @@ Layout:
     /home/.snapshots/<user>/                root 0700 + ACL u:<user>:r-x
     /home/.snapshots/<user>/daily-2026-10-29
     /home/.snapshots/<user>/manual-2026-10-29_14-05-09
+    /home/.snapshots/<user>/predeploy-2026-10-29_14-05-09
     /home/.snapshots/@home/                 root 0755 (the names are dates)
     /home/.snapshots/@home/daily-2026-10-29/<user>/...
 """
@@ -115,7 +126,9 @@ def _person_dir(account, create: bool):
 
 def _name(kind: str, now: Optional[dt.datetime] = None) -> str:
     now = now or dt.datetime.now()
-    return f"daily-{now.date().isoformat()}" if kind == "daily" else "manual-" + now.strftime("%Y-%m-%d_%H-%M-%S")
+    if kind == "daily":
+        return f"daily-{now.date().isoformat()}"
+    return kind + "-" + now.strftime("%Y-%m-%d_%H-%M-%S")
 
 
 def snapshot_person(user: str, kind: str = "manual", now=None) -> Result:
@@ -162,32 +175,73 @@ def snapshot_whole(kind: str = "manual", now=None) -> Result:
     return Result(True, dest) if r.ok else r
 
 
-def daily(keep: int = 14, now=None) -> list:
-    """Today's snapshot for every person (once), then the oldest daily ones
-    beyond `keep` removed. [(who, Result)] - who is a user name or "@home"."""
+def _snapshot_all(kind: str, now=None) -> list:
+    """One snapshot of `kind` for every person: its own when the home is a
+    subvolume, otherwise one of all of /home. [(who, Result)]."""
     out = []
     whole_needed = False
     for a in people():
         home = os.path.join(HOME, a.pw_name)
         if btrfs.is_btrfs_path(home):
-            out.append((a.pw_name, snapshot_person(a.pw_name, "daily", now)))
+            out.append((a.pw_name, snapshot_person(a.pw_name, kind, now)))
         else:
             whole_needed = True
     if whole_needed:
-        out.append((ALL, snapshot_whole("daily", now)))
+        out.append((ALL, snapshot_whole(kind, now)))
+    return out
+
+
+def _prune(kind: str, keep: int) -> list:
+    """The oldest snapshots of `kind` beyond `keep`, removed. [(who, Result)].
+
+    `keep` 0 means keep everything, the same as `home daily --keep 0`."""
+    out = []
+    if keep <= 0:
+        return out
+    for d in _snapshot_dirs():
+        try:
+            names = os.listdir(d)
+        except OSError as e:
+            out.append((os.path.basename(d), Result(False, str(e))))
+            continue
+        for old in sorted(n for n in names if n.startswith(kind + "-"))[:-keep]:
+            out.append((os.path.basename(d), _delete(os.path.join(d, old))))
+    return out
+
+
+def daily(keep: int = 14, now=None) -> list:
+    """Today's snapshot for every person (once), then the oldest daily ones
+    beyond `keep` removed. [(who, Result)] - who is a user name or "@home"."""
+    out = _snapshot_all("daily", now)
     # a snapshot holds on to what was deleted since, so on a nearly full disk
     # only the newest few are kept (snapper's FREE_LIMIT, in spirit)
     if keep > 0 and low_on_space():
         keep = min(keep, LOW_SPACE_KEEP)
-    if keep > 0:
-        for d in _snapshot_dirs():
-            for old in sorted(n for n in os.listdir(d) if n.startswith("daily-"))[:-keep]:
-                out.append((os.path.basename(d), _delete(os.path.join(d, old))))
+    out += _prune("daily", keep)
     return out
 
 
 FREE_LIMIT = 0.15                 # below this share of the disk free, keep fewer
 LOW_SPACE_KEEP = 2
+PREDEPLOY_KEEP = 2                # this update, and the one before it
+
+
+def predeploy(keep: int = PREDEPLOY_KEEP, now=None) -> list:
+    """A snapshot of every home taken immediately before an update.
+
+    `shani-deploy` calls this before it writes to the standby slot, so an
+    update always has a same-minute undo. It deliberately does not reuse
+    `daily()`: that one is idempotent per day, so an afternoon update would
+    be told the morning's snapshot already exists and would hold files from
+    before the day's work. The name carries the time, so every deploy gets
+    a new snapshot, and only the newest `keep` are kept - the snapshot from
+    the previous deploy is exactly what a second failed update needs.
+    [(who, Result)] - who is a user name or "@home"."""
+    out = _snapshot_all("predeploy", now)
+    if keep > 0 and low_on_space():
+        keep = min(keep, LOW_SPACE_KEEP)
+    out += _prune("predeploy", keep)
+    return out
 
 
 def low_on_space() -> bool:

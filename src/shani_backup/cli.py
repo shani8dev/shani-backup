@@ -64,8 +64,8 @@ def _home(args, home_parser) -> int:
             print(f"{s.name:28} {s.path}")
         return 0
 
-    if cmd == "daily":
-        results = home.daily(keep=args.keep)
+    if cmd in ("daily", "predeploy"):
+        results = home.daily(keep=args.keep) if cmd == "daily" else home.predeploy(keep=args.keep)
         ok = all(r.ok for _, r in results)
         if as_json:
             return _json_out({"ok": ok, "results": [{"who": w, "ok": r.ok, "detail": r.detail} for w, r in results],
@@ -173,6 +173,8 @@ def main():
     h.add_argument("user", nargs="?", help="Whose home (root only); yours when left out")
     h = home_sub.add_parser("daily", help="Today's snapshot of every home, and old ones removed (root; the timer runs this)")
     h.add_argument("--keep", type=int, default=14, help="Daily snapshots kept per home (default 14; 0 keeps all)")
+    h = home_sub.add_parser("predeploy", help="A fresh snapshot before an update, and old ones removed (root; shani-deploy runs this)")
+    h.add_argument("--keep", type=int, default=home.PREDEPLOY_KEEP, help="Pre-deploy snapshots kept per home (default 2; 0 keeps all)")
     h = home_sub.add_parser("remove", help="Remove one of your own snapshots (root)")
     h.add_argument("name", help="The snapshot's name, as `home list` shows it")
     h.add_argument("--user", help="Whose snapshot; yours when left out")
