@@ -76,6 +76,11 @@ class BackupsPage(Gtk.Box):
         self.now_btn.connect("clicked", self._back_up)
         self.last_row.add_suffix(self.now_btn)
         now.add(self.last_row)
+        # restic.restore_test: after every backup one file is restored from it
+        self.test_row = Adw.ActionRow(title="Restore test", visible=False)
+        self.test_icon = Gtk.Image(icon_name="object-select-symbolic", pixel_size=20)
+        self.test_row.add_prefix(self.test_icon)
+        now.add(self.test_row)
         self.progress_row = Adw.ActionRow(title="Backing up…", visible=False)
         self.progress = Gtk.ProgressBar(valign=Gtk.Align.CENTER, width_request=160)
         self.progress_row.add_suffix(self.progress)
@@ -120,9 +125,10 @@ class BackupsPage(Gtk.Box):
         repo = self.config.get_backup_location() or ""
         p = restic.place(repo)
         ok, snaps, why = restic.snapshots(repo) if p.is_repo else (True, [], "")
-        GLib.idle_add(self._show, p, ok, snaps, why, restic.schedule_on(), restic.schedule_time())
+        GLib.idle_add(self._show, p, ok, snaps, why, restic.schedule_on(), restic.schedule_time(),
+                      restic.last_restore_test())
 
-    def _show(self, p, ok, snaps, why, on, hhmm):
+    def _show(self, p, ok, snaps, why, on, hhmm, tested=None):
         self.place = p
         if not p.path or (p.reachable and not p.is_repo):
             self.stack.set_visible_child_name("start")
@@ -143,6 +149,16 @@ class BackupsPage(Gtk.Box):
             self.last_icon.remove_css_class(c)
         self.last_icon.add_css_class("warning" if stale or not ok else "success")
         self.now_btn.set_sensitive(p.reachable and not self.busy)
+        self.test_row.set_visible(bool(tested))
+        if tested:
+            t = dt.datetime.fromtimestamp(tested.get("at", 0))
+            self.test_row.set_subtitle(GLib.markup_escape_text(
+                f"{_when(t)} · restored {os.path.basename(tested.get('file', ''))}" if tested.get("ok")
+                else f"{_when(t)} · failed: {tested.get('detail', '')}"))
+            self.test_icon.set_from_icon_name("object-select-symbolic" if tested.get("ok") else "dialog-warning-symbolic")
+            for c in ("success", "warning"):
+                self.test_icon.remove_css_class(c)
+            self.test_icon.add_css_class("success" if tested.get("ok") else "warning")
 
         self._setting = True
         self.auto.set_active(on)
@@ -250,6 +266,8 @@ class BackupsPage(Gtk.Box):
 
         def run():
             res = restic.backup(repo, tick)
+            if res.ok:
+                restic.restore_test(repo, res.detail)
             GLib.idle_add(done, res)
 
         def done(res):

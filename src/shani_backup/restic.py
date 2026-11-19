@@ -191,6 +191,88 @@ def restore(repo: str, snap_id: str, target: str) -> Result:
     return Result(r.returncode == 0, target if r.returncode == 0 else _why(r))
 
 
+# ---- the restore test ---------------------------------------------------------------------------
+# A backup nobody has ever restored from is a hope, not a backup. After every
+# backup one small file is restored from it into a scratch folder - with
+# restic's --verify, which reads the restored data back against the
+# repository - and its size is compared with what the backup lists. The file
+# rotates (a different one each day), and the result is kept so the app and
+# `backups --json` can say when a restore last worked. Ananta OS does the same
+# (ananta-maintenanced, backup.rs restore_test).
+RESTORE_TEST_MAX = 50 << 20          # bytes: big enough to mean something, small enough to be quick
+
+
+def _state_file() -> str:
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    return os.path.join(base, APP, "restore-test.json")
+
+
+def last_restore_test() -> Optional[dict]:
+    """{"ok", "at", "snapshot", "file", "detail"} of the last restore test, or None."""
+    try:
+        with open(_state_file()) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _keep_restore_test(entry: dict) -> None:
+    path = _state_file()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path + ".tmp", "w") as f:
+            json.dump(entry, f)
+        os.replace(path + ".tmp", path)
+    except OSError:
+        pass
+
+
+def restore_test(repo: str, snap_id: str, today: Optional[int] = None) -> Result:
+    """Restore one small file of backup `snap_id` into a scratch folder and check
+    it arrived whole. Result.detail is the file's path inside the backup, or why
+    it failed. The outcome is kept for last_restore_test()."""
+    import tempfile
+    import time
+    when = int(time.time())
+    r, why = _restic(repo, "ls", "--json", snap_id, timeout=600)
+    if r is None or r.returncode != 0:
+        res = Result(False, why if r is None else _why(r))
+    else:
+        files = []
+        for line in r.stdout.splitlines():
+            try:
+                n = json.loads(line)
+            except ValueError:
+                continue
+            if n.get("type") == "file" and 0 < int(n.get("size") or 0) <= RESTORE_TEST_MAX:
+                files.append(n)
+        if not files:
+            res = Result(False, "The backup holds no file to test a restore with")
+        else:
+            files.sort(key=lambda n: n["path"])
+            pick = files[(today if today is not None else when // 86400) % len(files)]
+            cache = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+            os.makedirs(cache, exist_ok=True)
+            scratch = tempfile.mkdtemp(prefix="shani-backup-restore-test-", dir=cache)
+            try:
+                r, why = _restic(repo, "restore", snap_id, "--target", scratch, "--include", pick["path"],
+                                 "--verify", timeout=600)
+                got = os.path.join(scratch, pick["path"].lstrip("/"))
+                if r is None:
+                    res = Result(False, why)
+                elif r.returncode != 0:
+                    res = Result(False, _why(r))
+                elif not os.path.isfile(got) or os.path.getsize(got) != int(pick["size"]):
+                    res = Result(False, f"{pick['path']} came back damaged or missing")
+                else:
+                    res = Result(True, pick["path"])
+            finally:
+                shutil.rmtree(scratch, ignore_errors=True)
+    _keep_restore_test({"ok": res.ok, "at": when, "snapshot": snap_id,
+                        **({"file": res.detail} if res.ok else {"detail": res.detail})})
+    return res
+
+
 # ---- the schedule (a systemd user timer) --------------------------------------------------------
 def _user_systemctl(*args):
     try:

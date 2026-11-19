@@ -392,6 +392,57 @@ def test_restic_back_up_list_restore(repo, tmp_path, monkeypatch):
     assert not r.ok and "not empty" in r.detail
 
 
+def _home_with_files(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / "Documents").mkdir(parents=True)
+    (home / "Documents" / "a.txt").write_text("first file " * 50)
+    (home / "Documents" / "b.txt").write_text("second file " * 80)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdgcache"))
+    return home
+
+
+def test_restic_restore_test_passes_and_is_kept(repo, tmp_path, monkeypatch):
+    from shani_backup import restic
+    _home_with_files(tmp_path, monkeypatch)
+    b = restic.backup(str(repo))
+    assert b.ok, b.detail
+    picked = set()
+    for day in (0, 1):                                  # the file rotates by day
+        r = restic.restore_test(str(repo), b.detail, today=day)
+        assert r.ok, r.detail
+        picked.add(r.detail)
+    assert {os.path.basename(p) for p in picked} == {"a.txt", "b.txt"}, picked
+    kept = restic.last_restore_test()
+    assert kept["ok"] is True and kept["snapshot"] == b.detail and kept["file"] in picked
+    # the scratch folder is gone afterwards
+    assert not [d for d in os.listdir(tmp_path / "xdgcache") if d.startswith("shani-backup-restore-test-")]
+
+
+def test_restic_restore_test_fails_on_a_damaged_backup(repo, tmp_path, monkeypatch):
+    """NEGATIVE control: the same test against a backup whose data is damaged
+    must fail, say so, and keep the failure - or it proves nothing."""
+    from shani_backup import restic
+    _home_with_files(tmp_path, monkeypatch)
+    b = restic.backup(str(repo))
+    assert b.ok, b.detail
+    packs = [os.path.join(d, f) for d, _, fs in os.walk(repo / "data") for f in fs]
+    assert packs
+    for p in packs:                                     # flip bytes in every data pack
+        with open(p, "r+b") as f:
+            data = bytearray(f.read())
+            for i in range(0, len(data), 7):
+                data[i] ^= 0xFF
+            f.seek(0)
+            f.write(data)
+    monkeypatch.setenv("RESTIC_CACHE_DIR", str(tmp_path / "cache-after-damage"))
+    r = restic.restore_test(str(repo), b.detail, today=0)
+    assert not r.ok, r.detail
+    kept = restic.last_restore_test()
+    assert kept["ok"] is False and kept["snapshot"] == b.detail and kept["detail"]
+
+
 def test_restic_wrong_password_says_so(repo, monkeypatch):
     from shani_backup import restic
     monkeypatch.setenv("RESTIC_PASSWORD", "wrong")

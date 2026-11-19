@@ -211,11 +211,17 @@ def main():
         result = restic.backup(repo, progress, args.source)
         if result.ok and args.scheduled:
             restic.thin(repo)
+        # every backup is restored from once, one small file (restic.restore_test)
+        tested = restic.restore_test(repo, result.detail) if result.ok else None
         if args.json:
-            sys.exit(_json_out({"ok": result.ok, **({"snapshot": result.detail} if result.ok else {"error": result.detail})},
+            sys.exit(_json_out({"ok": result.ok,
+                                **({"snapshot": result.detail} if result.ok else {"error": result.detail}),
+                                **({"restore_test": {"ok": tested.ok, "detail": tested.detail}} if tested else {})},
                                result.ok))
         print()
         print(f"Backed up: {result.detail}" if result.ok else f"Error: {result.detail}")
+        if tested:
+            print(f"Restore test: {'restored ' + tested.detail if tested.ok else 'FAILED - ' + tested.detail}")
         sys.exit(0 if result.ok else 1)
     elif args.command == "restore":
         repo = args.repository or get_config().get_backup_location() or ""
@@ -232,7 +238,8 @@ def main():
         ok, snaps, why = restic.snapshots(repo) if p.is_repo else (True, [], "")
         payload = {"ok": ok, "repository": repo, "reachable": p.reachable, "set_up": p.is_repo,
                    "schedule": {"on": restic.schedule_on(), "time": restic.schedule_time()},
-                   "backups": [s._asdict() for s in snaps], **({} if ok else {"error": why})}
+                   "backups": [s._asdict() for s in snaps], "restore_test": restic.last_restore_test(),
+                   **({} if ok else {"error": why})}
         if args.json:
             sys.exit(_json_out(payload, ok))
         print(f"Backup drive: {repo or '(none)'}" + ("" if p.reachable or not repo else " - not connected"))
