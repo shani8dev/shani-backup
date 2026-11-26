@@ -235,3 +235,11 @@ two repos (unlike `shani-settings`/`shani-keyring`, which have one).
 Standalone at the application level — no other shani repo imports or depends
 on `shani_backup`. The `.install` script's scheduler hook is the only
 cross-cutting reference and it points at a nonexistent unit (see above).
+
+## Shared architecture (all repos)
+
+One implementation per capability, logic out of UI code, every UI and the
+assistant built on the same services: the plan is `../shani-shell/docs/SHARED-ARCHITECTURE.md`, and this
+repo's part is `docs/SHARED-PLAN.md`. Read both before changing a backend, a
+CLI, a device engine or a settings page, and do as much of this repo's part
+as your task allows.
